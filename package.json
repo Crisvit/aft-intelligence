@@ -1,0 +1,20 @@
+{
+  "name": "aft-intelligence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AFT 2.0 — dashboard independiente de Herramitienda: catálogo/stock de AFT, comparación read-only con Shopify, incidencias y rentabilidad.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "migrate": "node scripts/migrate.js",
+    "sync": "node scripts/run-sync.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "bcryptjs": "^2.4.3",
+    "pg": "^8.12.0"
+  }
+}
