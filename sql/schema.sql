@@ -227,6 +227,21 @@ CREATE TABLE IF NOT EXISTS rentabilidad_resultados (
   checked_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Corrección confirmada con datos reales de hmt-db: AFT sí da portes
+-- específicos por referencia (aft_catalogo.portes) para envío directo al
+-- cliente en productos grandes/pesados (escaleras, andamios...) — ya NO se
+-- usa una tarifa fija (13€) para esas categorías/pesos, ni los 4,41€
+-- anteriores como si fueran el coste real de transporte de AFT. Las reglas
+-- de categoría/peso de config_transporte_cliente quedan desactivadas; la
+-- regla "default" se conserva solo como respaldo propio para referencias
+-- SIN portes válido de AFT (ver src/rentabilidad.js).
+UPDATE config_transporte_cliente SET activo = false WHERE tipo IN ('categoria', 'peso_minimo');
+
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS es_envio_directo_aft BOOLEAN DEFAULT false;
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS comision_venta_importe NUMERIC;
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS datos_incompletos BOOLEAN DEFAULT false;
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS datos_incompletos_motivo TEXT;
+
 -- Historial (append-only) de alertas de rentabilidad, con explicación legible.
 CREATE TABLE IF NOT EXISTS rentabilidad_alertas (
   id             SERIAL PRIMARY KEY,

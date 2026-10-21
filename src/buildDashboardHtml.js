@@ -226,16 +226,23 @@ const oportunidadesHtml = oportunidadRows.length
 const ESTADO_RENT_BADGE = {
   perdida: '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Pérdida</span>',
   margen_bajo: '<span class="badge badge-warn">Margen bajo</span>',
+  datos_incompletos: '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">Datos incompletos</span>',
   sin_pvp: '<span class="badge badge-off">Sin PVP</span>'
 };
+function explicacionTransporte(r){
+  if (r.es_envio_directo_aft) return 'Envío directo de AFT (portes real por referencia)';
+  if (r.transporte_cliente_origen === 'default' || (r.transporte_cliente_origen || '').indexOf(':') === -1) return 'Tarifa propia de respaldo (AFT no da portes para esta ref)';
+  return 'Tarifa propia de respaldo (' + esc(r.transporte_cliente_origen) + ') — AFT no da portes para esta ref';
+}
 function filaRentabilidad(r){
+  const incompleta = r.estado_rentabilidad === 'datos_incompletos';
   return '<tr data-ref="' + esc((r.ref||'').toLowerCase()) + '" data-nombre="' + esc((r.descripcion||'').toLowerCase()) + '" data-estado="' + esc(r.estado_rentabilidad) + '">' +
-    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + ' · ' + esc(titleCase(r.marca || '')) + '</div></td>' +
-    '<td class="num" data-label="Coste sin IVA">' + eur(r.coste_sin_iva) + '</td>' +
-    '<td class="num" data-label="+IVA/recargo">' + eur(r.coste_con_impuestos) + '</td>' +
-    '<td class="num" data-label="Transporte cliente">' + eur(r.transporte_cliente) + '<div style="font-size:10.5px;color:var(--sub);">' + esc(r.transporte_cliente_origen) + '</div></td>' +
-    '<td class="num" data-label="Portes proveedor (AFT)">' + (r.portes_proveedor_aft != null ? eur(r.portes_proveedor_aft) + ' *' : '—') + '</td>' +
-    '<td class="num" data-label="Coste total estimado">' + eur(r.coste_total_estimado) + '</td>' +
+    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + ' · ' + esc(titleCase(r.marca || '')) + '</div>' + (r.datos_incompletos_motivo ? '<div style="font-size:10.5px;color:#D97706;margin-top:2px;">' + esc(r.datos_incompletos_motivo) + '</div>' : '') + '</td>' +
+    '<td class="num" data-label="Coste producto">' + (incompleta ? '—' : eur(r.coste_sin_iva)) + '</td>' +
+    '<td class="num" data-label="+IVA/recargo">' + (incompleta ? '—' : eur(r.coste_con_impuestos)) + '</td>' +
+    '<td class="num" data-label="Transporte">' + (incompleta ? '—' : eur(r.transporte_cliente)) + '<div style="font-size:10.5px;color:var(--sub);">' + explicacionTransporte(r) + '</div></td>' +
+    '<td class="num" data-label="Comisión venta">' + (incompleta || r.comision_venta_importe == null ? '—' : eur(r.comision_venta_importe)) + '</td>' +
+    '<td class="num" data-label="Coste total (estimado)">' + (incompleta ? '—' : eur(r.coste_total_estimado)) + '</td>' +
     '<td class="num" data-label="PVP">' + eur(r.pvp_real) + (r.pvp_es_real ? '' : ' <span style="font-size:10px;color:var(--sub);">(proyectado)</span>') + '</td>' +
     '<td class="num" data-label="Margen">' + (r.margen_pct != null ? '<span class="' + (r.margen_pct < 0 ? '' : 'ok') + '" style="' + (r.margen_pct < 0 ? 'color:#DC2626;font-weight:600;' : '') + '">' + pct(r.margen_pct) + '</span>' : '—') + '</td>' +
     '<td data-label="Estado">' + (ESTADO_RENT_BADGE[r.estado_rentabilidad] || esc(r.estado_rentabilidad)) + '</td>' +
@@ -245,17 +252,17 @@ const rentabilidadResultadosSeguro = rentabilidadResultados || [];
 const rentabilidadHtml = ultimaRentabilidad
   ? (rentabilidadResultadosSeguro.length
       ? '<div class="filterbar"><input type="text" id="buscarRentabilidad" class="filter-select" placeholder="Buscar por ref o nombre..." style="flex:1;max-width:280px;" oninput="filtrarRentabilidad()"/>' +
-          '<select id="filtroEstadoRentabilidad" class="filter-select" onchange="filtrarRentabilidad()"><option value="">Todos</option><option value="perdida">Pérdida</option><option value="margen_bajo">Margen bajo</option></select></div>' +
-        '<div class="table-note" id="contadorRentabilidad">Mostrando ' + rentabilidadResultadosSeguro.length + ' de ' + pl(rentabilidadResultadosSeguro.length, 'producto que requiere atención', 'productos que requieren atención') + ' (de ' + num(ultimaRentabilidad.procesados) + ' analizados).</div>' +
-        '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Coste sin IVA</th><th>+IVA/recargo</th><th>Transporte cliente</th><th>Portes proveedor (AFT)</th><th>Coste total estimado</th><th>PVP</th><th>Margen</th><th>Estado</th></tr></thead><tbody id="tablaRentabilidadBody">' +
+          '<select id="filtroEstadoRentabilidad" class="filter-select" onchange="filtrarRentabilidad()"><option value="">Todos (ordenados por riesgo)</option><option value="perdida">Pérdida</option><option value="datos_incompletos">Datos incompletos</option><option value="margen_bajo">Margen bajo</option></select></div>' +
+        '<div class="table-note" id="contadorRentabilidad">Mostrando ' + rentabilidadResultadosSeguro.length + ' de ' + pl(rentabilidadResultadosSeguro.length, 'producto que requiere atención', 'productos que requieren atención') + ' (de ' + num(ultimaRentabilidad.procesados) + ' analizados), ordenados por riesgo: pérdida primero, después datos incompletos, después margen bajo.</div>' +
+        '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Coste producto</th><th>+IVA/recargo</th><th>Transporte</th><th>Comisión venta</th><th>Coste total (estimado)</th><th>PVP</th><th>Margen</th><th>Estado</th></tr></thead><tbody id="tablaRentabilidadBody">' +
         rentabilidadResultadosSeguro.map(filaRentabilidad).join('') +
         '</tbody></table></div>' +
-        '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">* Portes proveedor (AFT) es el campo portes de AFT, informativo — no se suma al coste total porque no está confirmado si ya viene incluido en el coste base. El coste registrado en Shopify tampoco se usa para calcular margen (su IVA no está confirmado) — el margen se calcula con el coste total estimado de esta tabla.</p>' +
+        '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste total se marca "(estimado)": el tratamiento fiscal de los portes de AFT (si el IVA ya está incluido en ese importe) todavía no está confirmado. El "Transporte" usa el portes real de AFT por referencia cuando está disponible (envío directo); solo se usa una tarifa propia de respaldo cuando AFT no da portes para esa ref — nunca se suman ambos. El coste registrado en Shopify tampoco se usa para calcular el margen (su IVA no está confirmado), solo para la alerta de diferencia de coste.</p>' +
         '<h3 style="font-size:14px;margin:28px 0 12px;">Historial de alertas</h3>' +
         (rentabilidadAlertas && rentabilidadAlertas.length
-          ? '<div class="panel-card">' + rentabilidadAlertas.slice(0, 50).map(a => '<div class="tl-row"><div class="tl-dot" style="background:' + (a.tipo === 'perdida' ? '#DC2626' : '#D97706') + '"></div><div class="tl-body"><div class="tl-text">' + esc(a.detalle) + '</div><div class="tl-time">' + esc(tiempoRelativo(a.detectado_en)) + '</div></div></div>').join('') + '</div>'
+          ? '<div class="panel-card">' + rentabilidadAlertas.slice(0, 50).map(a => '<div class="tl-row"><div class="tl-dot" style="background:' + (a.tipo === 'perdida' ? '#DC2626' : (a.tipo === 'datos_incompletos' ? '#6B7280' : '#D97706')) + '"></div><div class="tl-body"><div class="tl-text">' + esc(a.detalle) + '</div><div class="tl-time">' + esc(tiempoRelativo(a.detectado_en)) + '</div></div></div>').join('') + '</div>'
           : '<div class="empty-state">Sin alertas registradas todavía.</div>')
-      : '<div class="empty-state">La última ejecución no encontró productos en pérdida ni con margen bajo.</div>')
+      : '<div class="empty-state">La última ejecución no encontró productos en pérdida, con margen bajo ni con datos incompletos.</div>')
   : '<div class="empty-state">El agente de rentabilidad todavía no se ha ejecutado. Lánzalo desde Integraciones.</div>';
 
 // --- Página Productos: catálogo COMPLETO de Shopify (todas las variantes,

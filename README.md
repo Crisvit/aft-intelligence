@@ -98,21 +98,35 @@ Shopify Admin API (solo lectura, paginada) ─┘
 `src/rentabilidad.js` reutiliza el cálculo de coste/IVA/recargo ya validado
 en `sync.js` (`calcularCosteYMargen`, sin tocarlo) y añade:
 
-- **Transporte al cliente configurable** (`config_transporte_cliente` en
-  hmt-db, editable sin redeploy): excepción por referencia > categoría >
-  peso mínimo > valor por defecto (con umbral de envío gratis). Nunca una
-  tarifa única — las categorías "ESCALERA"/"ANDAMIO" y los productos con
-  `peso_gr >= 20000` llevan 13€ fijo y nunca envío gratis, por defecto.
+- **Transporte: el portes real de AFT por referencia, no una tarifa fija.**
+  Confirmado con datos reales (`aft_catalogo.portes`): escaleras, andamios y
+  accesorios llevan importes distintos por referencia (7,50€–23€ en los
+  ejemplos verificados), no un valor único. Cuando el portes de una
+  referencia es válido, es "envío directo de AFT" y se usa tal cual. **Ya
+  no se usa una tarifa fija de 13€ para categorías/pesos grandes** ni se
+  trata el antiguo valor de 4,41€ como si fuera el coste real de AFT — ese
+  valor queda solo como tarifa propia de respaldo (`config_transporte_cliente`,
+  regla `default`), y únicamente para referencias **sin** portes válido.
+- **portes se interpreta como importe monetario, validado**: vacío (normal,
+  cae al respaldo propio), formato inválido o valor negativo (anómalo —
+  genera alerta `datos_incompletos` y también cae al respaldo, nunca se
+  inventa un número).
 - **Transporte del proveedor vs. transporte al cliente, sin duplicar**:
-  `aft_catalogo.portes` (lo que cobra AFT a Herramitienda) se calcula y se
-  muestra, pero **no se suma** al coste total — no está confirmado si ya
-  viene incluido en `aft_stock_precios.costo`.
+  cuando AFT envía directo (portes válido) no se suma ninguna tarifa propia
+  encima — nunca ambos a la vez.
+- **Comisión de venta**, diferenciada como su propia línea del desglose —
+  0€ por defecto (sin inventar un porcentaje) hasta configurar
+  `RENTABILIDAD_COMISION_VENTA_PCT` con un dato real.
+- **Coste final siempre marcado "(estimado)"**: el tratamiento fiscal de
+  portes (si el importe ya incluye IVA) todavía no está confirmado.
 - **Alertas explicadas**: pérdida (margen negativo), margen bajo (por
-  debajo de `RENTABILIDAD_MARGEN_BAJO_PCT`, 15% por defecto) y diferencia
-  de coste con Shopify (por encima de `RENTABILIDAD_DIFERENCIA_COSTE_PCT`,
-  20% por defecto) — cada una con el detalle legible de por qué saltó,
-  guardado en `rentabilidad_alertas` (historial, no se borra entre
-  ejecuciones).
+  debajo de `RENTABILIDAD_MARGEN_BAJO_PCT`, 15% por defecto), diferencia de
+  coste con Shopify (por encima de `RENTABILIDAD_DIFERENCIA_COSTE_PCT`, 20%
+  por defecto) y datos incompletos (coste/PVP de AFT faltante, o portes con
+  formato/valor inválido) — cada una con el detalle legible de por qué
+  saltó, guardada en `rentabilidad_alertas` (historial, no se borra entre
+  ejecuciones). La pestaña Rentabilidad ordena por riesgo: pérdida primero,
+  después datos incompletos, después margen bajo.
 
 ## Coste registrado en Shopify — pendiente de validar
 

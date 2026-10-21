@@ -331,10 +331,19 @@ async function renderDashboard() {
   const { rows: ultimoPipelineRows } = await pool.query(`SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1`);
   const ultimoPipeline = ultimoPipelineRows[0] || null;
 
-  // Productos que requieren atención: pérdida o margen bajo, de la última
-  // ejecución del agente de rentabilidad (prioridad 1).
+  // Productos que requieren atención: pérdida, margen bajo o datos
+  // incompletos, de la última ejecución del agente de rentabilidad
+  // (prioridad 1). Ordenados por riesgo: pérdida primero, luego datos
+  // incompletos, luego margen bajo, y dentro de cada grupo por margen.
   const { rows: rentabilidadResultados } = await pool.query(
-    `SELECT * FROM rentabilidad_resultados WHERE estado_rentabilidad IN ('perdida','margen_bajo') ORDER BY margen_pct ASC NULLS LAST`
+    `SELECT * FROM rentabilidad_resultados
+     WHERE estado_rentabilidad IN ('perdida','margen_bajo','datos_incompletos')
+     ORDER BY CASE estado_rentabilidad
+                WHEN 'perdida' THEN 0
+                WHEN 'datos_incompletos' THEN 1
+                WHEN 'margen_bajo' THEN 2
+                ELSE 3
+              END, margen_pct ASC NULLS LAST`
   );
 
   const { rows: rentabilidadAlertas } = await pool.query(
