@@ -454,24 +454,53 @@ app.get('/', basicAuth, async (req, res) => {
 // Programación automática del pipeline completo — DESACTIVADA por defecto.
 // Solo se activa si se define PIPELINE_SCHEDULE_HOURS explícitamente en el
 // entorno (no viene en .env.example con un valor real a propósito): desplegar
-// este código no hace que se ejecute nada automáticamente por sí solo.
+// este código no hace que se ejecute nada automáticamente por sí solo. Ver
+// README para cómo activarlo en Easypanel.
+//
+// Resiliente a reinicios: en vez de un setInterval puro desde el arranque
+// (que perdería la cuenta si el servicio se reinicia, como en un redeploy),
+// comprueba contra pipeline_runs cuándo terminó con éxito la última
+// ejecución y decide si ya toca otra, igual después de un reinicio que en
+// marcha normal.
 const PIPELINE_SCHEDULE_HOURS = Number(process.env.PIPELINE_SCHEDULE_HOURS) || 0;
+async function debeEjecutarPipelineProgramado(intervaloMs) {
+  const { rows } = await pool.query(
+    `SELECT finished_at FROM pipeline_runs WHERE status = 'success' ORDER BY finished_at DESC LIMIT 1`
+  );
+  if (!rows.length) return true; // nunca se ha completado un pipeline con éxito todavía
+  const desdeUltimaMs = Date.now() - new Date(rows[0].finished_at).getTime();
+  return desdeUltimaMs >= intervaloMs;
+}
 if (PIPELINE_SCHEDULE_HOURS > 0) {
   const intervaloMs = PIPELINE_SCHEDULE_HOURS * 60 * 60 * 1000;
-  console.log(`[pipeline] Programado automáticamente cada ${PIPELINE_SCHEDULE_HOURS}h (PIPELINE_SCHEDULE_HOURS).`);
-  setInterval(async () => {
+  // Revisa con más frecuencia que el intervalo configurado (cada 30 min, o
+  // antes si PIPELINE_SCHEDULE_HOURS es menor) — la decisión de lanzar o no
+  // siempre la toma debeEjecutarPipelineProgramado() contra la fecha real
+  // en BD, esta cadencia solo controla cada cuánto se comprueba.
+  const CHECK_INTERVAL_MS = Math.min(intervaloMs, 30 * 60 * 1000);
+  console.log(`[pipeline] Programado automáticamente cada ${PIPELINE_SCHEDULE_HOURS}h (PIPELINE_SCHEDULE_HOURS), comprobado cada ${Math.round(CHECK_INTERVAL_MS / 60000)} min.`);
+
+  async function tickProgramado() {
     try {
       const enCurso = await haySolapamiento();
       if (enCurso) {
-        console.log(`[pipeline] Ejecución programada omitida: ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).`);
+        console.log(`[pipeline] Comprobación programada: ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}), se revisará en el siguiente ciclo.`);
         return;
       }
+      const toca = await debeEjecutarPipelineProgramado(intervaloMs);
+      if (!toca) return;
       console.log('[pipeline] Lanzando ejecución programada del pipeline completo...');
       await lanzarPipelineCompleto();
     } catch (e) {
-      console.error('[pipeline] Error en la ejecución programada:', e.message);
+      console.error('[pipeline] Error en la comprobación/ejecución programada:', e.message);
     }
-  }, intervaloMs);
+  }
+
+  setInterval(tickProgramado, CHECK_INTERVAL_MS);
+  // Primera comprobación poco después de arrancar (no al instante, para dar
+  // tiempo a que la conexión a hmt-db esté lista) — así un reinicio del
+  // servicio no deja la ejecución diaria esperando un ciclo completo.
+  setTimeout(tickProgramado, 60 * 1000);
 }
 
 app.listen(PORT, () => {

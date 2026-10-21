@@ -39,8 +39,13 @@ muestra como activo si no lo está (ver "Qué no está conectado todavía").
 - **Rentabilidad** (prioridad 1): coste desglosado por referencia (sin IVA,
   con IVA/recargo, transporte al cliente, portes del proveedor AFT
   mostrados aparte), margen real (PVP de Shopify) o proyectado (PVP de AFT
-  para oportunidades), y alertas explicadas de pérdida, margen bajo y
-  diferencia de coste con Shopify, con su historial.
+  para oportunidades), el escenario de pedido agrupado («Pendiente de
+  cotización», sin coste ni margen inventados) y alertas explicadas de
+  pérdida, margen bajo y diferencia de coste con Shopify, con su historial.
+  Incluye también "Recomendaciones de venta": productos con margen
+  suficiente separados en venta individual y venta complementaria (productos
+  de bajo precio candidatos a cross-sell), con los ya publicados en Shopify
+  siempre antes que las nuevas oportunidades de AFT.
 - **Actividad**: historial de ejecuciones e incidencias registradas
   (incluye las alertas de rentabilidad).
 - **Integraciones**: estado real de los tres agentes que sí funcionan
@@ -127,6 +132,23 @@ en `sync.js` (`calcularCosteYMargen`, sin tocarlo) y añade:
   saltó, guardada en `rentabilidad_alertas` (historial, no se borra entre
   ejecuciones). La pestaña Rentabilidad ordena por riesgo: pérdida primero,
   después datos incompletos, después margen bajo.
+- **Pedido agrupado, sin coste inventado**: AFT permite agrupar varios
+  productos en un mismo pedido, pero el coste de ese transporte agrupado
+  depende del peso total y todavía no hay una tarifa verificada. Por eso
+  `resolverEscenarioAgrupado()` **nunca** calcula un coste ni un margen para
+  este escenario — solo muestra el peso total de la referencia (si se
+  conoce) y un estado explícito: "Pendiente de cotización" cuando hay envío
+  directo de AFT confirmado para esa ref, "No aplica" en caso contrario.
+  Nunca se suman los portes individuales como sustituto del coste agrupado:
+  un pedido agrupado paga un único porte por el peso conjunto, así que
+  sumarlos sobrestimaría el coste real y daría una cifra inventada.
+- **Clasificación de venta** (informativa, no cambia coste ni margen):
+  `individual` (margen suficiente, venta destacada por sí sola),
+  `complementaria` (margen suficiente pero PVP bajo — candidato a venta
+  cruzada, umbral configurable con `RENTABILIDAD_PVP_COMPLEMENTO_MAX`, 15€
+  por defecto), `margen_insuficiente` (pérdida/margen bajo/sin PVP — nunca
+  se reclasifica como complementaria aunque el PVP sea bajo) y
+  `datos_incompletos`.
 
 ## Coste registrado en Shopify — pendiente de validar
 
@@ -165,14 +187,40 @@ Las credenciales reales de AFT y Shopify se pasan como el cuerpo exacto
 (JSON) del POST de token — así este código nunca necesita conocer los
 nombres de campo exactos que exige cada API.
 
-## Automatización (prioridad 2)
+## Automatización (prioridad 2) — ejecución autónoma diaria
 
 El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar
 pipeline completo" en Integraciones) encadena importación AFT →
 sincronización Shopify (solo lectura) → rentabilidad, en ese orden, en
-segundo plano. La programación automática está **desactivada por defecto**:
-solo se activa si defines `PIPELINE_SCHEDULE_HOURS` explícitamente — sin
-esa variable, desplegar este código no ejecuta nada por sí solo.
+segundo plano.
+
+**Desactivada por defecto.** Sin la variable `PIPELINE_SCHEDULE_HOURS`
+definida (no viene con un valor real en `.env.example` a propósito),
+desplegar este código no ejecuta nada por sí solo — hay que activarla
+explícitamente.
+
+**Cómo activarla en Easypanel** (servicio `hmt-intelligence` → Environment):
+
+1. Añade la variable `PIPELINE_SCHEDULE_HOURS` con el número de horas entre
+   ejecuciones (por ejemplo `PIPELINE_SCHEDULE_HOURS=24` para una vez al día).
+2. Redeploy del servicio.
+3. Verifica en los logs del contenedor que aparece la línea
+   `[pipeline] Programado automáticamente cada 24h...` al arrancar.
+4. El progreso de cada ejecución programada se ve igual que uno manual: en
+   Integraciones o vía `GET /api/pipeline-run/estado`.
+5. Para desactivarla de nuevo, elimina la variable (o ponla a `0`) y
+   redeploy.
+
+**Diseño, resiliente a reinicios**: en vez de un temporizador puro desde el
+arranque (que perdería la cuenta en cada redeploy), el servicio comprueba
+periódicamente (cada 30 minutos, o antes si `PIPELINE_SCHEDULE_HOURS` es
+menor) contra `pipeline_runs` cuándo terminó con éxito la última ejecución,
+y solo lanza una nueva si ya ha pasado el intervalo configurado desde
+entonces — igual después de un reinicio del servicio que en marcha normal.
+Comparte el mismo candado que el resto de agentes (`haySolapamiento()`): si
+ya hay un proceso en curso (lanzado a mano o por otra ejecución programada
+que se solapa), la comprobación programada se omite y se revisa en el
+siguiente ciclo, nunca se lanzan dos pipelines a la vez.
 
 ## Puesta en marcha
 
