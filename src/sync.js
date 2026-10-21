@@ -260,48 +260,63 @@ async function ingestAft(runId) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Candidatos: catálogo AFT ya combinado, filtrado por marca/categoría,
-//    con coste real calculado (IVA + recargo de equivalencia + portes).
+// 2. Coste real (IVA + recargo de equivalencia + portes) por referencia AFT.
+//
+// Dos vistas sobre el mismo cálculo, a propósito separadas:
+// - getTodasLasReferenciasConCoste(): TODAS las referencias con stock/precio
+//   (con o sin EAN), marcando esOportunidadComercial si además pasa el
+//   filtro de marca/categoría. La usa el control de inventario (prioridad
+//   absoluta: cruzar TODO AFT contra Shopify, EAN primero y SKU como
+//   alternativa inequívoca, sin descartar nada de antemano).
+// - getCandidatosConCoste(): el filtro de marca/categoría de siempre, para
+//   detectar oportunidades comerciales nuevas. Devuelve exactamente el
+//   mismo resultado que antes de este cambio — no se ha tocado su
+//   comportamiento ni su forma de datos.
 // ---------------------------------------------------------------------------
-async function getCandidatosConCoste() {
+function calcularCosteYMargen(d) {
+  const stock = Number(d.stock || 0);
+  const costoBase = Number(d.costo || 0);
+  const pvpSinIva = Number(d.pvp_sin_iva || 0);
+  const ivaRate = Number(d.por_iva || 0);
+  const recargoRate = IVA_RECARGO_MAP[ivaRate];
+  const recargoDesconocido = recargoRate === undefined;
+  const recargoAplicado = recargoDesconocido ? 0 : recargoRate;
+  const ivaImporte = round2(costoBase * (ivaRate / 100));
+  const recargoImporte = round2(costoBase * (recargoAplicado / 100));
+  const precioVentaAFT = round2(pvpSinIva * (1 + ivaRate / 100));
+  const transporteHerramitienda = precioVentaAFT >= FREE_SHIPPING_THRESHOLD ? SHIPPING_HERRAMITIENDA : 0;
+  const costeDesembolsado = round2(costoBase + ivaImporte + recargoImporte);
+  const costeParaMargen = round2(costeDesembolsado + transporteHerramitienda);
+
+  const marcaOk = BRANDS.some((m) => normalizar(d.marca).indexOf(m) !== -1);
+  const catOk = CATEGORIAS_INCLUIDAS.some((p) => normalizar(d.categoria_nombre).indexOf(p) !== -1);
+
+  return {
+    ref: d.ref, ean: d.ean, marca: d.marca, descripcion: d.descripcion,
+    stock, stockCero: stock === 0, stockNegativo: stock < 0,
+    ivaRate, recargoAplicado, recargoDesconocido,
+    costeBase: costoBase, ivaImporte, recargoImporte, transporteHerramitienda,
+    costeDesembolsado, costeParaMargen, precioVentaAFT,
+    esOportunidadComercial: marcaOk && catOk
+  };
+}
+
+async function getTodasLasReferenciasConCoste() {
   const { rows } = await pool.query(`
     SELECT c.ref, c.ean, c.marca, c.descripcion_corta AS descripcion, c.categoria_nombre,
            sp.stock, sp.costo, sp.pvp_sin_iva, c.por_iva
     FROM aft_catalogo c
     JOIN aft_stock_precios sp ON sp.ref = c.ref
-    WHERE c.ean IS NOT NULL AND c.ean <> ''
   `);
+  return rows.map(calcularCosteYMargen);
+}
 
-  const out = [];
-  for (const d of rows) {
-    const marcaOk = BRANDS.some((m) => normalizar(d.marca).indexOf(m) !== -1);
-    if (!marcaOk) continue;
-    const catOk = CATEGORIAS_INCLUIDAS.some((p) => normalizar(d.categoria_nombre).indexOf(p) !== -1);
-    if (!catOk) continue;
-
-    const stock = Number(d.stock || 0);
-    const costoBase = Number(d.costo || 0);
-    const pvpSinIva = Number(d.pvp_sin_iva || 0);
-    const ivaRate = Number(d.por_iva || 0);
-    const recargoRate = IVA_RECARGO_MAP[ivaRate];
-    const recargoDesconocido = recargoRate === undefined;
-    const recargoAplicado = recargoDesconocido ? 0 : recargoRate;
-    const ivaImporte = round2(costoBase * (ivaRate / 100));
-    const recargoImporte = round2(costoBase * (recargoAplicado / 100));
-    const precioVentaAFT = round2(pvpSinIva * (1 + ivaRate / 100));
-    const transporteHerramitienda = precioVentaAFT >= FREE_SHIPPING_THRESHOLD ? SHIPPING_HERRAMITIENDA : 0;
-    const costeDesembolsado = round2(costoBase + ivaImporte + recargoImporte);
-    const costeParaMargen = round2(costeDesembolsado + transporteHerramitienda);
-
-    out.push({
-      ref: d.ref, ean: d.ean, marca: d.marca, descripcion: d.descripcion,
-      stock, stockCero: stock === 0, stockNegativo: stock < 0,
-      ivaRate, recargoAplicado, recargoDesconocido,
-      costeBase: costoBase, ivaImporte, recargoImporte, transporteHerramitienda,
-      costeDesembolsado, costeParaMargen, precioVentaAFT
-    });
-  }
-  return out;
+async function getCandidatosConCoste() {
+  const todas = await getTodasLasReferenciasConCoste();
+  return todas
+    .filter((d) => d.ean != null && String(d.ean).trim() !== '')
+    .filter((d) => d.esOportunidadComercial)
+    .map(({ esOportunidadComercial, ...resto }) => resto);
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +413,62 @@ function edgesDesdeMapa(mapa, clave) {
   return { data: { productVariants: { edges: nodos.map((node) => ({ node })) } } };
 }
 
+const SHOPIFY_MATCH_BATCH_SIZE = 500;
+const SHOPIFY_MATCH_COLS = [
+  'ref', 'ean', 'marca', 'shopify_variant_id', 'shopify_inventory_item_id', 'shopify_product_title',
+  'shopify_price', 'shopify_stock', 'shopify_cost', 'matched_by', 'num_variantes_encontradas',
+  'alerta_duplicado', 'alerta_multiples_ubicaciones', 'alerta_ubicacion_no_encontrada',
+  'stock_aft', 'stock_diferencia', 'coste_para_margen', 'precio_venta_aft', 'margen_actual_pct',
+  'margen_con_precio_aft_pct', 'diferencia_precio_pct', 'recomendacion_precio', 'bloquear_escritura',
+  'estado', 'es_oportunidad_comercial', 'coste_aft_sin_iva', 'coste_aft_con_impuestos'
+];
+
+function valoresShopifyMatch(fila) {
+  return SHOPIFY_MATCH_COLS.map((c) => (fila[c] !== undefined ? fila[c] : null));
+}
+
+function construirInsertShopifyMatch(numFilas) {
+  const nCols = SHOPIFY_MATCH_COLS.length;
+  const grupos = [];
+  for (let i = 0; i < numFilas; i++) {
+    const placeholders = SHOPIFY_MATCH_COLS.map((_, c) => `$${i * nCols + c + 1}`);
+    grupos.push(`(${placeholders.join(',')}, now())`);
+  }
+  return `INSERT INTO shopify_match (${SHOPIFY_MATCH_COLS.join(',')}, checked_at) VALUES ${grupos.join(', ')}`;
+}
+
+// Guarda en lotes los resultados de comparar TODAS las referencias AFT
+// (hasta ~8.600+) en vez de una fila a la vez. Si un lote falla, se
+// reintenta fila a fila para aislar y loguear el error SQL exacto sin
+// perder el resto — igual que ya se hace en ingestAft() — y se va
+// actualizando el progreso real en sync_runs para poder seguirlo desde el
+// dashboard mientras corre en segundo plano.
+async function guardarResultadosEnLotes(filas, runId) {
+  let guardadas = 0;
+  for (let i = 0; i < filas.length; i += SHOPIFY_MATCH_BATCH_SIZE) {
+    const lote = filas.slice(i, i + SHOPIFY_MATCH_BATCH_SIZE);
+    try {
+      await pool.query(construirInsertShopifyMatch(lote.length), lote.flatMap(valoresShopifyMatch));
+      guardadas += lote.length;
+    } catch (e) {
+      console.error(`[runInventorySync] Fallo el lote de resultados (filas ${i}-${i + lote.length - 1}): ${e.message}. Reintentando fila a fila.`);
+      for (const fila of lote) {
+        try {
+          await pool.query(construirInsertShopifyMatch(1), valoresShopifyMatch(fila));
+          guardadas++;
+        } catch (e2) {
+          console.error(`[runInventorySync] Error SQL guardando resultado ref=${fila.ref}: ${e2.message}`);
+          await registrarIncidencia(fila.ref, fila.ean, 'error_sql_shopify_match', e2.message);
+        }
+      }
+    }
+    if (runId) {
+      await pool.query(`UPDATE sync_runs SET comparacion_procesadas = $2 WHERE id = $1`, [runId, Math.min(i + SHOPIFY_MATCH_BATCH_SIZE, filas.length)]);
+    }
+  }
+  return guardadas;
+}
+
 // ---------------------------------------------------------------------------
 // 4. Ejecuta la comparación completa AFT <-> Shopify (SOLO LECTURA) y guarda
 //    el resultado (diferencias + incidencias + resumen) en hmt-db.
@@ -426,7 +497,11 @@ async function runInventorySync(existingRunId) {
 
   try {
     await ingestAft();
-    const candidatos = await getCandidatosConCoste();
+    // Prioridad 1: TODAS las referencias AFT participan en el control de
+    // inventario/rentabilidad, no solo las de marcas/categorías comerciales
+    // (eso queda para getCandidatosConCoste(), usada aparte para detectar
+    // oportunidades nuevas — prioridad 2).
+    const candidatos = await getTodasLasReferenciasConCoste();
     const shopifyToken = await shopify.getShopifyToken();
 
     const mapaPorBarcode = new Map();
@@ -463,6 +538,9 @@ async function runInventorySync(existingRunId) {
     );
 
     await pool.query('DELETE FROM shopify_match');
+    await pool.query(`UPDATE sync_runs SET comparacion_total = $2 WHERE id = $1`, [runId, candidatos.length]);
+
+    const filasParaGuardar = [];
 
     for (const fuente of candidatos) {
       if (fuente.stockNegativo) {
@@ -471,19 +549,28 @@ async function runInventorySync(existingRunId) {
         continue;
       }
 
+      // EAN primero; SKU (la propia ref AFT) solo como alternativa, y solo
+      // si el EAN no encontró nada — esto ya cubre referencias sin EAN
+      // (edgesDesdeMapa devuelve vacío con clave null/vacía, no se excluyen
+      // de antemano, simplemente no hay nada que buscar por EAN).
       let resultado = combinarConShopify(fuente, edgesDesdeMapa(mapaPorBarcode, fuente.ean), 'ean');
 
       if (!resultado) {
-        // Fallback por SKU/referencia, solo cuando el EAN no encontró nada.
         resultado = combinarConShopify(fuente, edgesDesdeMapa(mapaPorSku, fuente.ref), 'sku');
       }
 
       if (!resultado) {
-        await pool.query(
-          `INSERT INTO shopify_match (ref, ean, marca, stock_aft, estado, checked_at)
-           VALUES ($1,$2,$3,$4,'no_encontrado', now())`,
-          [fuente.ref, fuente.ean, fuente.marca, fuente.stock]
-        );
+        const margenConPrecioAFTPct = fuente.precioVentaAFT
+          ? round2(((fuente.precioVentaAFT - fuente.costeParaMargen) / fuente.precioVentaAFT) * 100)
+          : null;
+        filasParaGuardar.push({
+          ref: fuente.ref, ean: fuente.ean, marca: fuente.marca,
+          stock_aft: fuente.stock, estado: 'no_encontrado',
+          precio_venta_aft: fuente.precioVentaAFT, coste_para_margen: fuente.costeParaMargen,
+          margen_con_precio_aft_pct: margenConPrecioAFTPct,
+          es_oportunidad_comercial: fuente.esOportunidadComercial,
+          coste_aft_sin_iva: fuente.costeBase, coste_aft_con_impuestos: fuente.costeDesembolsado
+        });
         counters.noEncontrados++;
         continue;
       }
@@ -509,24 +596,24 @@ async function runInventorySync(existingRunId) {
 
       counters.matched++;
 
-      await pool.query(
-        `INSERT INTO shopify_match (ref, ean, marca, shopify_variant_id, shopify_inventory_item_id,
-           shopify_product_title, shopify_price, shopify_stock, shopify_cost, matched_by,
-           num_variantes_encontradas, alerta_duplicado, alerta_multiples_ubicaciones,
-           alerta_ubicacion_no_encontrada, stock_aft, stock_diferencia, coste_para_margen,
-           precio_venta_aft, margen_actual_pct, margen_con_precio_aft_pct, diferencia_precio_pct,
-           recomendacion_precio, bloquear_escritura, estado, checked_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24, now())`,
-        [
-          resultado.ref, resultado.ean, resultado.marca, resultado.shopify_variant_id, resultado.shopify_inventory_item_id,
-          resultado.shopify_product_title, resultado.shopify_price, resultado.shopify_stock, resultado.shopify_cost, resultado.matched_by,
-          resultado.num_variantes_encontradas, resultado.alerta_duplicado, resultado.alerta_multiples_ubicaciones,
-          resultado.alerta_ubicacion_no_encontrada, resultado.stock_aft, resultado.stock_diferencia, resultado.coste_para_margen,
-          resultado.precio_venta_aft, resultado.margen_actual_pct, resultado.margen_con_precio_aft_pct, resultado.diferencia_precio_pct,
-          resultado.recomendacion_precio, resultado.bloquear_escritura, estado
-        ]
-      );
+      filasParaGuardar.push({
+        ref: resultado.ref, ean: resultado.ean, marca: resultado.marca,
+        shopify_variant_id: resultado.shopify_variant_id, shopify_inventory_item_id: resultado.shopify_inventory_item_id,
+        shopify_product_title: resultado.shopify_product_title, shopify_price: resultado.shopify_price,
+        shopify_stock: resultado.shopify_stock, shopify_cost: resultado.shopify_cost, matched_by: resultado.matched_by,
+        num_variantes_encontradas: resultado.num_variantes_encontradas, alerta_duplicado: resultado.alerta_duplicado,
+        alerta_multiples_ubicaciones: resultado.alerta_multiples_ubicaciones, alerta_ubicacion_no_encontrada: resultado.alerta_ubicacion_no_encontrada,
+        stock_aft: resultado.stock_aft, stock_diferencia: resultado.stock_diferencia, coste_para_margen: resultado.coste_para_margen,
+        precio_venta_aft: resultado.precio_venta_aft, margen_actual_pct: resultado.margen_actual_pct,
+        margen_con_precio_aft_pct: resultado.margen_con_precio_aft_pct, diferencia_precio_pct: resultado.diferencia_precio_pct,
+        recomendacion_precio: resultado.recomendacion_precio, bloquear_escritura: resultado.bloquear_escritura,
+        estado, es_oportunidad_comercial: fuente.esOportunidadComercial,
+        coste_aft_sin_iva: fuente.costeBase, coste_aft_con_impuestos: fuente.costeDesembolsado
+      });
     }
+
+    await pool.query(`UPDATE sync_runs SET fase = 'guardando_resultados' WHERE id = $1`, [runId]);
+    await guardarResultadosEnLotes(filasParaGuardar, runId);
 
     await pool.query(
       `UPDATE sync_runs SET finished_at = now(), status = 'success', fase = 'done',
@@ -557,4 +644,4 @@ async function registrarIncidencia(ref, ean, tipo, detalle) {
   );
 }
 
-module.exports = { ingestAft, runInventorySync, getCandidatosConCoste };
+module.exports = { ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste };

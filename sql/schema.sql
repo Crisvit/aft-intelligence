@@ -96,6 +96,22 @@ ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS shopify_variantes_leidas INTEGER 
 ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS shopify_lectura_completa BOOLEAN DEFAULT false;
 ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS permisos_incompletos BOOLEAN DEFAULT false;
 ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS permisos_detalle TEXT;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS comparacion_total INTEGER DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS comparacion_procesadas INTEGER DEFAULT 0;
+
+-- El control de inventario (ver src/sync.js) ahora cruza TODAS las
+-- referencias AFT contra Shopify, no solo las de marcas/categorías
+-- comerciales — es_oportunidad_comercial distingue, entre las no
+-- encontradas en Shopify, cuáles son una oportunidad real (pasan el
+-- filtro de marca/categoría) de las que simplemente están fuera de
+-- nuestro interés comercial.
+-- coste_aft_sin_iva / coste_aft_con_impuestos se guardan por separado de
+-- shopify_cost a propósito: NO se asume si el coste registrado en Shopify
+-- incluye o no IVA (sin confirmar con datos reales), así que no se calcula
+-- ninguna "diferencia de coste" automática entre AFT y Shopify todavía.
+ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS es_oportunidad_comercial BOOLEAN DEFAULT false;
+ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS coste_aft_sin_iva NUMERIC;
+ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS coste_aft_con_impuestos NUMERIC;
 
 CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,

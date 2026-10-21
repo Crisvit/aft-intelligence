@@ -210,6 +210,27 @@ async function renderDashboard() {
      FROM shopify_match WHERE estado IN ('cambiaria','a_cero') ORDER BY checked_at DESC LIMIT 500`
   );
 
+  // Oportunidades reales: referencias AFT de marcas/categorías comerciales
+  // que el último control de inventario NO encontró en Shopify (prioridad 2
+  // — separado del control de inventario, que cruza TODAS las referencias).
+  const { rows: oportunidadRows } = await pool.query(
+    `SELECT sm.ref, sm.ean, sm.marca, c.descripcion_corta AS descripcion, sm.stock_aft AS stock,
+            sm.precio_venta_aft AS precio, sm.coste_para_margen AS coste,
+            sm.margen_con_precio_aft_pct AS "margenPct", sm.checked_at AS "createdAt"
+     FROM shopify_match sm
+     JOIN aft_catalogo c ON c.ref = sm.ref
+     WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true
+     ORDER BY sm.margen_con_precio_aft_pct DESC NULLS LAST
+     LIMIT 200`
+  );
+  const candRows = oportunidadRows.map((r) => ({
+    id: r.ref, ref: r.ref, ean: r.ean, marca: r.marca, descripcion: r.descripcion,
+    stock: r.stock, precio: r.precio != null ? Number(r.precio) : null,
+    coste: r.coste != null ? Number(r.coste) : null,
+    margenPct: r.margenPct != null ? Number(r.margenPct) : 0,
+    estado: null, createdAt: r.createdAt
+  }));
+
   let shopifyProductsRaw = { data: { products: { edges: [] } } };
   try {
     const token = await shopify.getShopifyToken();
@@ -221,7 +242,7 @@ async function renderDashboard() {
   const html = buildDashboardHtml({
     syncRows,
     shopifyProductsRaw,
-    candRows: [],
+    candRows,
     draftRows: [],
     detailRows,
     demandSignalsRows: [],
