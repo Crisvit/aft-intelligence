@@ -376,13 +376,17 @@ async function renderDashboard() {
   // inequívoco) quedan fuera a propósito — esas se gestionan como incidencia,
   // no como una coincidencia fiable. La marca mostrada es la de aft_catalogo
   // (AFT real), nunca el vendor de Shopify.
+  // shopify_product_id viene de shopify_catalogo (vía shopify_variant_id,
+  // ya guardado en shopify_match) para poder enlazar "Ver en Shopify" al
+  // producto correcto — nunca a la variante, que no abre ficha en el admin.
   const { rows: matchRows } = await pool.query(
     `SELECT sm.ref, c.descripcion_corta AS descripcion, c.marca AS marca_aft, sm.matched_by,
             sm.stock_aft, sm.shopify_stock, sm.stock_diferencia,
             sm.coste_aft_sin_iva, sm.coste_aft_con_impuestos, sm.shopify_cost, sm.shopify_price,
-            sm.precio_venta_aft, sm.estado
+            sm.precio_venta_aft, sm.estado, sc.shopify_product_id
      FROM shopify_match sm
      LEFT JOIN aft_catalogo c ON c.ref = sm.ref
+     LEFT JOIN shopify_catalogo sc ON sc.shopify_variant_id = sm.shopify_variant_id
      WHERE sm.estado IN ('cambiaria','a_cero','sin_cambio')
      ORDER BY sm.estado, sm.ref`
   );
@@ -420,7 +424,7 @@ async function renderDashboard() {
   // similitud de nombre. Si no hay coincidencia fiable, se marca "sin
   // identificar": no se adivina ni se etiqueta como ningún otro proveedor.
   const { rows: productosShopify } = await pool.query(
-    `SELECT sc.shopify_variant_id, sc.titulo, sc.vendor_shopify, sc.estado, sc.sku, sc.barcode,
+    `SELECT sc.shopify_variant_id, sc.shopify_product_id, sc.titulo, sc.vendor_shopify, sc.estado, sc.sku, sc.barcode,
             sc.precio, sc.stock_ubicacion_principal AS stock, sc.imagen_url,
             sm.ref AS aft_ref
      FROM shopify_catalogo sc
@@ -429,11 +433,26 @@ async function renderDashboard() {
      ORDER BY sc.titulo NULLS LAST, sc.shopify_variant_id`
   );
 
+  // Total de productos (padres) distinto del total de variantes — el
+  // catálogo completo se lee por variante (getAllVariants), así que un
+  // mismo producto con varias variantes cuenta una vez aquí.
+  const { rows: totalesCatalogoRows } = await pool.query(
+    `SELECT COUNT(*)::int AS total_variantes, COUNT(DISTINCT shopify_product_id)::int AS total_productos
+     FROM shopify_catalogo`
+  );
+  const totalesCatalogo = totalesCatalogoRows[0] || { total_variantes: 0, total_productos: 0 };
+
+  // Handle de la tienda (parte antes de ".myshopify.com") para construir el
+  // enlace al admin de Shopify — nunca se adivina, se deriva de la misma
+  // variable de entorno que usa shopifyClient.js para hablar con la API.
+  const shopifyAdminStore = (process.env.SHOPIFY_SHOP || '').replace(/\.myshopify\.com$/i, '');
+
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
     pvpComplementoMax: PVP_COMPLEMENTO_MAX,
-    stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD
+    stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD,
+    totalesCatalogo, shopifyAdminStore
   });
 
   cache = { html, builtAt: now };
@@ -452,55 +471,87 @@ app.get('/', basicAuth, async (req, res) => {
 });
 
 // Programación automática del pipeline completo — DESACTIVADA por defecto.
-// Solo se activa si se define PIPELINE_SCHEDULE_HOURS explícitamente en el
-// entorno (no viene en .env.example con un valor real a propósito): desplegar
-// este código no hace que se ejecute nada automáticamente por sí solo. Ver
-// README para cómo activarlo en Easypanel.
+// Solo se activa si se define PIPELINE_SCHEDULE_HORA_MADRID explícitamente
+// en el entorno (no viene en .env.example con un valor real a propósito):
+// desplegar este código no hace que se ejecute nada automáticamente por sí
+// solo. Ver README para cómo activarlo en Easypanel.
+//
+// Ejecución diaria a una hora fija de Europe/Madrid (formato "HH:MM"),
+// respetando el cambio de horario verano/invierno automáticamente: se usa
+// Intl.DateTimeFormat con timeZone 'Europe/Madrid' para leer la hora local
+// real en cada comprobación, sin aritmética manual de offsets ni de DST.
 //
 // Resiliente a reinicios: en vez de un setInterval puro desde el arranque
 // (que perdería la cuenta si el servicio se reinicia, como en un redeploy),
-// comprueba contra pipeline_runs cuándo terminó con éxito la última
-// ejecución y decide si ya toca otra, igual después de un reinicio que en
-// marcha normal.
-const PIPELINE_SCHEDULE_HOURS = Number(process.env.PIPELINE_SCHEDULE_HOURS) || 0;
-async function debeEjecutarPipelineProgramado(intervaloMs) {
+// comprueba contra pipeline_runs si YA hubo una ejecución con éxito hoy
+// (fecha en Madrid) — igual después de un reinicio que en marcha normal.
+// Reintentos controlados: si la ejecución de hoy terminó en error (o no se
+// ha lanzado todavía), el siguiente ciclo de comprobación (cada 15 min) lo
+// volverá a intentar, siempre protegido por el mismo candado que el resto
+// de agentes (haySolapamiento) — nunca se solapan dos ejecuciones.
+const PIPELINE_SCHEDULE_HORA_MADRID = process.env.PIPELINE_SCHEDULE_HORA_MADRID || '';
+const MADRID_TZ = 'Europe/Madrid';
+
+function parseHoraHHMM(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  if (h < 0 || h > 23 || mi < 0 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+// Hora/fecha actuales en Europe/Madrid, ya con el cambio de horario
+// aplicado por el propio motor de Intl (no por este código).
+function fechaHoraEnMadrid(fecha) {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: MADRID_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+  });
+  const partes = Object.fromEntries(fmt.formatToParts(fecha).map((p) => [p.type, p.value]));
+  return { fechaStr: `${partes.year}-${partes.month}-${partes.day}`, minutosDelDia: Number(partes.hour) * 60 + Number(partes.minute) };
+}
+
+async function debeEjecutarPipelineHoyEnMadrid(horaObjetivoMin) {
+  const ahora = fechaHoraEnMadrid(new Date());
+  if (ahora.minutosDelDia < horaObjetivoMin) return false; // todavía no ha llegado la hora programada hoy
   const { rows } = await pool.query(
     `SELECT finished_at FROM pipeline_runs WHERE status = 'success' ORDER BY finished_at DESC LIMIT 1`
   );
   if (!rows.length) return true; // nunca se ha completado un pipeline con éxito todavía
-  const desdeUltimaMs = Date.now() - new Date(rows[0].finished_at).getTime();
-  return desdeUltimaMs >= intervaloMs;
+  const ultimaExitosa = fechaHoraEnMadrid(new Date(rows[0].finished_at));
+  return ultimaExitosa.fechaStr !== ahora.fechaStr; // ya corrió con éxito hoy (en Madrid) -> no repetir
 }
-if (PIPELINE_SCHEDULE_HOURS > 0) {
-  const intervaloMs = PIPELINE_SCHEDULE_HOURS * 60 * 60 * 1000;
-  // Revisa con más frecuencia que el intervalo configurado (cada 30 min, o
-  // antes si PIPELINE_SCHEDULE_HOURS es menor) — la decisión de lanzar o no
-  // siempre la toma debeEjecutarPipelineProgramado() contra la fecha real
-  // en BD, esta cadencia solo controla cada cuánto se comprueba.
-  const CHECK_INTERVAL_MS = Math.min(intervaloMs, 30 * 60 * 1000);
-  console.log(`[pipeline] Programado automáticamente cada ${PIPELINE_SCHEDULE_HOURS}h (PIPELINE_SCHEDULE_HOURS), comprobado cada ${Math.round(CHECK_INTERVAL_MS / 60000)} min.`);
 
-  async function tickProgramado() {
-    try {
-      const enCurso = await haySolapamiento();
-      if (enCurso) {
-        console.log(`[pipeline] Comprobación programada: ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}), se revisará en el siguiente ciclo.`);
-        return;
+if (PIPELINE_SCHEDULE_HORA_MADRID) {
+  const horaObjetivoMin = parseHoraHHMM(PIPELINE_SCHEDULE_HORA_MADRID);
+  if (horaObjetivoMin == null) {
+    console.error(`[pipeline] PIPELINE_SCHEDULE_HORA_MADRID="${PIPELINE_SCHEDULE_HORA_MADRID}" no es una hora válida (formato HH:MM, ej. "10:00") — programación automática DESACTIVADA, revisa la variable de entorno.`);
+  } else {
+    const CHECK_INTERVAL_MS = 15 * 60 * 1000; // suficiente margen para no perderse la ventana de la hora objetivo
+    console.log(`[pipeline] Programado automáticamente una vez al día a las ${PIPELINE_SCHEDULE_HORA_MADRID} (Europe/Madrid, DST automático), comprobado cada 15 min.`);
+
+    async function tickProgramado() {
+      try {
+        const enCurso = await haySolapamiento();
+        if (enCurso) {
+          console.log(`[pipeline] Comprobación programada: ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}), se revisará en el siguiente ciclo.`);
+          return;
+        }
+        const toca = await debeEjecutarPipelineHoyEnMadrid(horaObjetivoMin);
+        if (!toca) return;
+        console.log('[pipeline] Lanzando ejecución diaria programada del pipeline completo...');
+        await lanzarPipelineCompleto();
+      } catch (e) {
+        console.error('[pipeline] Error en la comprobación/ejecución programada:', e.message);
       }
-      const toca = await debeEjecutarPipelineProgramado(intervaloMs);
-      if (!toca) return;
-      console.log('[pipeline] Lanzando ejecución programada del pipeline completo...');
-      await lanzarPipelineCompleto();
-    } catch (e) {
-      console.error('[pipeline] Error en la comprobación/ejecución programada:', e.message);
     }
-  }
 
-  setInterval(tickProgramado, CHECK_INTERVAL_MS);
-  // Primera comprobación poco después de arrancar (no al instante, para dar
-  // tiempo a que la conexión a hmt-db esté lista) — así un reinicio del
-  // servicio no deja la ejecución diaria esperando un ciclo completo.
-  setTimeout(tickProgramado, 60 * 1000);
+    setInterval(tickProgramado, CHECK_INTERVAL_MS);
+    // Primera comprobación poco después de arrancar (no al instante, para
+    // dar tiempo a que la conexión a hmt-db esté lista) — así un reinicio
+    // del servicio no deja la ejecución diaria esperando hasta el próximo
+    // ciclo completo de 15 minutos.
+    setTimeout(tickProgramado, 60 * 1000);
+  }
 }
 
 app.listen(PORT, () => {

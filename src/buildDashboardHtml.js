@@ -18,7 +18,9 @@ function buildDashboardHtml({
   rentabilidadAlertas,
   rentabilidadRecomendaciones,
   pvpComplementoMax,
-  stockMinimoOportunidad
+  stockMinimoOportunidad,
+  totalesCatalogo,
+  shopifyAdminStore
 }) {
 
 function esc(s){ return String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -56,13 +58,37 @@ const ICON = {
   alertTri: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
   packageX: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8M8.5 5.5l7 4"/>',
   chevron: '<path d="M9 18l6-6-6-6"/>',
-  circle: '<circle cx="12" cy="12" r="10"/>'
+  circle: '<circle cx="12" cy="12" r="10"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
 };
 function icon(name, size, color){ return '<svg width="'+(size||16)+'" height="'+(size||16)+'" viewBox="0 0 24 24" fill="none" stroke="'+(color||'currentColor')+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>'; }
 
-function imgUrl(ref){ return 'https://www.aftgrupo.com/img_artics/' + ref + '.jpg'; }
-function aftUrl(ref){ return 'https://www.aftgrupo.com/productos/ref-' + ref; }
-const SHOPIFY_ADMIN_PRODUCTS = 'https://admin.shopify.com/store/kb9i0z-da/products';
+// AFT no tiene (todavía) una URL de producto pública confirmada — no se
+// inventa una (eso es lo que daba enlaces en blanco antes). Mientras no
+// exista una URL real verificada, el único enlace a AFT que se ofrece es
+// "Copiar referencia" para buscarla a mano en el ERP/portal de AFT.
+function copiarReferenciaBtn(ref){
+  return '<button type="button" class="sec-link" style="background:none;border:none;cursor:pointer;padding:0;font:inherit;" onclick="copiarReferencia(this,\'' + esc(ref) + '\')" title="Copiar la referencia AFT al portapapeles">' +
+    icon('copy', 11) + ' Copiar ref. AFT</button>';
+}
+// URL del producto en el admin de Shopify — construida SOLO a partir del
+// shopify_product_id real (el ID del producto padre, leído de la API vía
+// product.id en la consulta de variantes), nunca del id de la variante:
+// /admin/products/<id de VARIANTE> no es una ficha válida y da página en
+// blanco. Sin un product_id guardado (catálogo todavía no re-sincronizado
+// tras este fix), no se construye ningún enlace — se muestra como ausente
+// en vez de adivinar uno roto.
+function shopifyProductUrl(productGid){
+  if (!productGid || !shopifyAdminStore) return null;
+  const numId = String(productGid).split('/').pop();
+  if (!/^\d+$/.test(numId)) return null;
+  return 'https://admin.shopify.com/store/' + shopifyAdminStore + '/products/' + numId;
+}
+function enlaceShopify(productGid){
+  const url = shopifyProductUrl(productGid);
+  if (!url) return '<span style="color:var(--sub);font-size:11.5px;">Sin ID de producto</span>';
+  return '<a class="sec-link" href="' + esc(url) + '" target="_blank" rel="noopener">Ver en Shopify ' + icon('chevron', 11) + '</a>';
+}
 
 // --- Datos reales, sin inventar nada ---
 // productosShopify ya viene de hmt-db (shopify_catalogo, todas las variantes
@@ -71,9 +97,10 @@ const SHOPIFY_ADMIN_PRODUCTS = 'https://admin.shopify.com/store/kb9i0z-da/produc
 // fiable por EAN/SKU) o "Sin identificar" — nunca se adivina a partir del
 // vendor de Shopify ni por similitud de nombre.
 const shopifyProducts = (productosShopify || []).map(p => ({
-  id: p.shopify_variant_id, titulo: p.titulo, vendorShopify: p.vendor_shopify, estado: p.estado,
+  id: p.shopify_variant_id, productId: p.shopify_product_id,
+  titulo: p.titulo, vendorShopify: p.vendor_shopify, estado: p.estado,
   imagen: p.imagen_url, precio: p.precio != null ? Number(p.precio) : null, stock: p.stock,
-  sku: p.sku, barcode: p.barcode,
+  sku: p.sku, barcode: p.barcode, aftRef: p.aft_ref,
   proveedor: p.aft_ref ? ('AFT (ref ' + p.aft_ref + ')') : 'Sin identificar',
   esAft: !!p.aft_ref
 }));
@@ -174,6 +201,7 @@ function filaCoincidencia(r){
     '<td class="num" data-label="PVP Shopify">' + eur(r.shopify_price) + '</td>' +
     '<td class="num" data-label="PVP AFT">' + eur(r.precio_venta_aft) + '</td>' +
     '<td data-label="Estado">' + (ESTADO_BADGE[r.estado] || esc(r.estado)) + '</td>' +
+    '<td data-label="Enlaces">' + enlaceShopify(r.shopify_product_id) + '<div style="margin-top:4px;">' + copiarReferenciaBtn(r.ref) + '</div></td>' +
     '</tr>';
 }
 const coincidenciasHtml = matchRows.length
@@ -187,7 +215,7 @@ const coincidenciasHtml = matchRows.length
       '</select>' +
     '</div>' +
     '<div class="table-note" id="contadorCoincidencias">Mostrando ' + matchRows.length + ' de ' + pl(matchRows.length, 'coincidencia fiable', 'coincidencias fiables') + ' (emparejadas por EAN o SKU inequívoco). Las coincidencias ambiguas no se muestran aquí — se gestionan como incidencia (ver Actividad).</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca (AFT)</th><th>Coincide por</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca (AFT)</th><th>Coincide por</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th><th>Enlaces</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
     matchRows.map(filaCoincidencia).join('') +
     '</tbody></table></div>' +
     '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste registrado en Shopify se muestra tal cual está en la ficha — su tratamiento de IVA está pendiente de validar, por eso no se calcula una "diferencia de coste" automática entre AFT y Shopify.</p>'
@@ -207,7 +235,7 @@ function filaOportunidad(c){
     '<td class="num" data-label="Coste">' + eur(c.coste) + '</td>' +
     '<td class="num" data-label="PVP recomendado">' + eur(c.precio) + '</td>' +
     '<td class="num ok" data-label="Margen">' + (margen != null ? pct(margen) : '—') + '</td>' +
-    '<td data-label=""><a class="sec-link" href="' + aftUrl(c.ref) + '" target="_blank" rel="noopener">Ver en AFT ' + icon('chevron', 11) + '</a></td>' +
+    '<td data-label="Enlaces">' + copiarReferenciaBtn(c.ref) + '</td>' +
   '</tr>';
 }
 const oportunidadesHtml = oportunidadRows.length
@@ -216,7 +244,7 @@ const oportunidadesHtml = oportunidadRows.length
       '<select id="filtroMargen" class="filter-select" onchange="filtrarOportunidades()"><option value="0">Cualquier margen</option><option value="20">20%+</option><option value="30">30%+</option><option value="40">40%+</option></select>' +
     '</div>' +
     '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Orden: marcas prioritarias (Wolfpack/Samurai/Maurer/Papillon/Saturnia) primero, después por margen — ambos configurables por variable de entorno.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th></th></tr></thead><tbody id="tablaOportunidadesBody">' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
     oportunidadRows.map(filaOportunidad).join('') +
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
@@ -331,17 +359,16 @@ function badgeEstadoProducto(estado){
 }
 function filaProducto(p){
   const img = p.imagen ? '<img src="' + p.imagen + '" style="width:32px;height:32px;object-fit:contain;border-radius:6px;background:#F1F2F4;"/>' : '<div style="width:32px;height:32px;border-radius:6px;background:#F1F2F4;"></div>';
-  const numId = (p.id || '').split('/').pop();
-  const shopifyUrl = SHOPIFY_ADMIN_PRODUCTS + '/' + numId;
   const disponibilidad = p.stock > 0 ? 'con_stock' : 'sin_stock';
-  return '<tr class="row-clickable" data-nombre="' + esc((p.titulo||'').toLowerCase()) + '" data-vendor="' + esc(p.vendorShopify || '') + '" data-estado="' + esc(p.estado || '') + '" data-proveedor="' + (p.esAft ? 'aft' : 'sin_identificar') + '" data-disponibilidad="' + disponibilidad + '" onclick="window.open(\'' + shopifyUrl + '\',\'_blank\')">' +
+  return '<tr data-nombre="' + esc((p.titulo||'').toLowerCase()) + '" data-vendor="' + esc(p.vendorShopify || '') + '" data-estado="' + esc(p.estado || '') + '" data-proveedor="' + (p.esAft ? 'aft' : 'sin_identificar') + '" data-disponibilidad="' + disponibilidad + '">' +
     '<td data-label="">' + img + '</td>' +
     '<td data-label="Producto">' + esc(p.titulo) + '<div style="font-size:11px;color:var(--sub);">' + esc(p.sku || '') + '</div></td>' +
     '<td data-label="Proveedor">' + (p.esAft ? '<span class="badge badge-ok">' + esc(p.proveedor) + '</span>' : '<span class="badge badge-off">Sin identificar</span>') + '</td>' +
     '<td data-label="Marca (Shopify)">' + esc(p.vendorShopify || '—') + '</td>' +
     '<td class="num" data-label="Precio">' + eur(p.precio) + '</td>' +
     '<td class="num" data-label="Stock">' + (p.stock == null ? '—' : p.stock) + '</td>' +
-    '<td data-label="Estado">' + badgeEstadoProducto(p.estado) + '</td></tr>';
+    '<td data-label="Estado">' + badgeEstadoProducto(p.estado) + '</td>' +
+    '<td data-label="Enlaces">' + enlaceShopify(p.productId) + (p.esAft ? '<div style="margin-top:4px;">' + copiarReferenciaBtn(p.aftRef) + '</div>' : '') + '</td></tr>';
 }
 const vendoresShopify = Array.from(new Set(shopifyProducts.map(p => p.vendorShopify).filter(Boolean))).sort();
 const productosHtml = shopifyProducts.length
@@ -352,11 +379,11 @@ const productosHtml = shopifyProducts.length
       '<select id="filtroEstadoProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Estado: todos</option><option value="ACTIVE">Activo</option><option value="DRAFT">Borrador</option><option value="ARCHIVED">Archivado</option></select>' +
       '<select id="filtroDisponibilidadProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Disponibilidad: todas</option><option value="con_stock">Con stock</option><option value="sin_stock">Sin stock</option></select>' +
     '</div>' +
-    '<div class="table-note" id="contadorProductos">Mostrando ' + shopifyProducts.length + ' de ' + pl(shopifyProducts.length, 'variante', 'variantes') + '.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th></th><th>Producto</th><th>Proveedor</th><th>Marca (Shopify)</th><th>Precio</th><th>Stock</th><th>Estado</th></tr></thead><tbody id="tablaProductosBody">' +
+    '<div class="table-note" id="contadorProductos">Mostrando ' + shopifyProducts.length + ' de ' + pl(shopifyProducts.length, 'variante', 'variantes') + (totalesCatalogo ? ' (' + pl(totalesCatalogo.total_productos, 'producto distinto', 'productos distintos') + ', ' + pl(totalesCatalogo.total_variantes, 'variante', 'variantes') + ' en total en el catálogo leído)' : '') + '.</div>' +
+    '<div class="table-scroll"><table><thead><tr><th></th><th>Producto</th><th>Proveedor</th><th>Marca (Shopify)</th><th>Precio</th><th>Stock</th><th>Estado</th><th>Enlaces</th></tr></thead><tbody id="tablaProductosBody">' +
     shopifyProducts.map(filaProducto).join('') +
     '</tbody></table></div>' +
-    '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">"Proveedor" solo se marca como AFT cuando hubo una coincidencia fiable por EAN o SKU con el catálogo AFT — nunca se infiere del campo "Marca (Shopify)" (vendor), que puede contener valores que no son marcas reales.</p>'
+    '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">"Proveedor" solo se marca como AFT cuando hubo una coincidencia fiable por EAN o SKU con el catálogo AFT — nunca se infiere del campo "Marca (Shopify)" (vendor), que puede contener valores que no son marcas reales (p. ej. textos de envío). "Ver en Shopify" enlaza siempre al producto (nunca a la variante) usando su ID real leído de la API; sin ese ID guardado (catálogo pendiente de re-sincronizar) se muestra "Sin ID de producto" en vez de un enlace roto.</p>'
   : '<div class="empty-state">Todavía no se ha leído el catálogo de Shopify. Ejecuta una sincronización desde Integraciones.</div>';
 
 // --- Integraciones: estado real de los dos agentes operativos, y los
@@ -564,6 +591,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 
 '</main><script>' +
 'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");}' +
+'function copiarReferencia(btn,ref){var original=btn.innerHTML;function ok(){btn.innerHTML="Copiado ✓";setTimeout(function(){btn.innerHTML=original;},1500);}function fallback(){try{var ta=document.createElement("textarea");ta.value=ref;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.focus();ta.select();document.execCommand("copy");document.body.removeChild(ta);ok();}catch(e){btn.innerHTML="Ref: "+ref;}}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ref).then(ok).catch(fallback);}else{fallback();}}' +
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
 'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;r.style.display=(okMarca&&okMargen)?"":"none";});}' +

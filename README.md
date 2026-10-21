@@ -23,19 +23,39 @@ muestra como activo si no lo está (ver "Qué no está conectado todavía").
   la marca real del catálogo AFT (nunca el vendor de Shopify), cómo se
   encontró cada coincidencia (EAN/SKU), stock en AFT, stock en Shopify,
   diferencia, coste AFT (sin IVA y con impuestos), coste registrado en
-  Shopify y PVP de ambos. Las coincidencias ambiguas (EAN duplicado,
-  múltiples ubicaciones) no aparecen aquí — se gestionan como incidencia.
+  Shopify, PVP de ambos y un enlace real "Ver en Shopify". Las coincidencias
+  ambiguas (EAN duplicado, múltiples ubicaciones) no aparecen aquí — se
+  gestionan como incidencia.
 - **Oportunidades**: referencias de tus marcas/categorías comerciales que
   AFT tiene en stock y la última sincronización no encontró en Shopify,
   priorizando Wolfpack/Samurai/Maurer/Papillon/Saturnia (configurable vía
-  `AFT_BRANDS_PRIORITARIAS`).
+  `AFT_BRANDS_PRIORITARIAS`), con botón "Copiar ref. AFT" (ver "Enlaces de
+  producto" más abajo).
 - **Productos**: catálogo completo de Shopify (todas las variantes, solo
   lectura) con 4 filtros independientes — proveedor identificado, marca
-  (vendor de Shopify), estado (activo/borrador/archivado) y disponibilidad.
-  "Proveedor: AFT" solo aparece cuando hubo una coincidencia fiable por
-  EAN/SKU con el catálogo AFT; el resto se marca "Sin identificar" — nunca
-  se adivina a partir del vendor de Shopify (que puede traer valores que no
-  son marcas, como textos de envío) ni por similitud de nombre.
+  (vendor de Shopify), estado (activo/borrador/archivado) y disponibilidad —
+  y el total de productos distintos y de variantes mostrado por separado
+  (un mismo producto puede tener varias variantes). "Proveedor: AFT" solo
+  aparece cuando hubo una coincidencia fiable por EAN/SKU con el catálogo
+  AFT; el resto se marca "Sin identificar" — nunca se adivina a partir del
+  vendor de Shopify (que puede traer valores que no son marcas, como textos
+  de envío, p. ej. "Envíos Gratis a España") ni por similitud de nombre.
+  Cada fila enlaza "Ver en Shopify" al producto real en el admin.
+
+### Enlaces de producto
+
+- **"Ver en Shopify"** (Coincidencias, Productos) enlaza siempre al
+  **producto** en el admin de Shopify, construido con el `product.id` real
+  leído de la API GraphQL de variantes y guardado en
+  `shopify_catalogo.shopify_product_id` — nunca con el ID de la variante
+  (que no abre una ficha válida y daba página en blanco). Si una fila
+  todavía no tiene ese ID guardado (catálogo leído antes de este fix, en
+  espera de una próxima sincronización), se muestra "Sin ID de producto" en
+  vez de un enlace roto.
+- **"Copiar ref. AFT"** (Oportunidades, Productos, Coincidencias): AFT no
+  tiene todavía una URL de producto pública confirmada, así que no se
+  inventa ninguna — el botón copia la referencia al portapapeles para
+  buscarla a mano en el ERP/portal de AFT.
 - **Rentabilidad** (prioridad 1): coste desglosado por referencia (sin IVA,
   con IVA/recargo, transporte al cliente, portes del proveedor AFT
   mostrados aparte), margen real (PVP de Shopify) o proyectado (PVP de AFT
@@ -194,33 +214,41 @@ pipeline completo" en Integraciones) encadena importación AFT →
 sincronización Shopify (solo lectura) → rentabilidad, en ese orden, en
 segundo plano.
 
-**Desactivada por defecto.** Sin la variable `PIPELINE_SCHEDULE_HOURS`
+**Desactivada por defecto.** Sin la variable `PIPELINE_SCHEDULE_HORA_MADRID`
 definida (no viene con un valor real en `.env.example` a propósito),
 desplegar este código no ejecuta nada por sí solo — hay que activarla
 explícitamente.
 
 **Cómo activarla en Easypanel** (servicio `hmt-intelligence` → Environment):
 
-1. Añade la variable `PIPELINE_SCHEDULE_HOURS` con el número de horas entre
-   ejecuciones (por ejemplo `PIPELINE_SCHEDULE_HOURS=24` para una vez al día).
+1. Añade la variable `PIPELINE_SCHEDULE_HORA_MADRID=10:00` (formato
+   `HH:MM`, hora local de Europe/Madrid — cualquier otra hora es válida, no
+   solo las 10:00).
 2. Redeploy del servicio.
-3. Verifica en los logs del contenedor que aparece la línea
-   `[pipeline] Programado automáticamente cada 24h...` al arrancar.
+3. Verifica en los logs del contenedor que aparece la línea `[pipeline]
+   Programado automáticamente una vez al día a las 10:00 (Europe/Madrid,
+   DST automático)...` al arrancar. Una hora con formato inválido se
+   rechaza igual, dejando la programación desactivada y un error claro en
+   los logs — nunca arranca con una hora ambigua.
 4. El progreso de cada ejecución programada se ve igual que uno manual: en
    Integraciones o vía `GET /api/pipeline-run/estado`.
-5. Para desactivarla de nuevo, elimina la variable (o ponla a `0`) y
-   redeploy.
+5. Para desactivarla de nuevo, elimina la variable y redeploy.
 
-**Diseño, resiliente a reinicios**: en vez de un temporizador puro desde el
-arranque (que perdería la cuenta en cada redeploy), el servicio comprueba
-periódicamente (cada 30 minutos, o antes si `PIPELINE_SCHEDULE_HOURS` es
-menor) contra `pipeline_runs` cuándo terminó con éxito la última ejecución,
-y solo lanza una nueva si ya ha pasado el intervalo configurado desde
-entonces — igual después de un reinicio del servicio que en marcha normal.
-Comparte el mismo candado que el resto de agentes (`haySolapamiento()`): si
-ya hay un proceso en curso (lanzado a mano o por otra ejecución programada
-que se solapa), la comprobación programada se omite y se revisa en el
-siguiente ciclo, nunca se lanzan dos pipelines a la vez.
+**Diseño, resiliente a reinicios y a cambios de horario**: en vez de un
+temporizador puro desde el arranque (que perdería la cuenta en cada
+redeploy), el servicio comprueba cada 15 minutos la hora real en
+Europe/Madrid (vía `Intl.DateTimeFormat`, que resuelve el cambio de horario
+verano/invierno automáticamente, sin aritmética manual de offsets) y la
+compara contra `pipeline_runs`: si ya ha pasado la hora configurada y
+**todavía no hubo una ejecución con éxito hoy** (fecha en Madrid), lanza el
+pipeline — igual después de un reinicio del servicio que en marcha normal.
+Si la ejecución de hoy terminó en error, el siguiente ciclo de 15 minutos
+la reintenta automáticamente (reintento controlado, nunca indefinido:
+como máximo un pipeline completo por día una vez tiene éxito). Comparte el
+mismo candado que el resto de agentes (`haySolapamiento()`): si ya hay un
+proceso en curso (lanzado a mano o por otra ejecución programada que se
+solapa), la comprobación se omite y se revisa en el siguiente ciclo — nunca
+se lanzan dos pipelines a la vez.
 
 ## Puesta en marcha
 
