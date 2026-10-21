@@ -98,3 +98,29 @@ CREATE TABLE IF NOT EXISTS sync_lock (
   status      TEXT NOT NULL,
   started_at  TIMESTAMPTZ
 );
+
+-- Progreso e historial de cada ejecución de la importación AFT en segundo
+-- plano (sustituye el flag en memoria). Permite reintentos seguros: si el
+-- servicio se reinicia a mitad de una importación, la fila queda en
+-- 'running' y se recupera como obsoleta la siguiente vez que se solicita
+-- una importación (ver server.js).
+CREATE TABLE IF NOT EXISTS aft_import_runs (
+  id                      SERIAL PRIMARY KEY,
+  started_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at             TIMESTAMPTZ,
+  status                  TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  fase                    TEXT,                              -- 'iniciando' | 'categorias' | 'productos' | 'stock' | 'done'
+  total_categorias        INTEGER DEFAULT 0,
+  categorias_insertadas   INTEGER DEFAULT 0,
+  categorias_duplicadas   INTEGER DEFAULT 0,
+  total_productos         INTEGER DEFAULT 0,
+  productos_insertados    INTEGER DEFAULT 0,
+  productos_duplicados    INTEGER DEFAULT 0,
+  total_stock             INTEGER DEFAULT 0,
+  stock_insertado         INTEGER DEFAULT 0,
+  stock_duplicado         INTEGER DEFAULT 0,
+  stock_huerfano          INTEGER DEFAULT 0,
+  incidencias             INTEGER DEFAULT 0,
+  errores_sql             INTEGER DEFAULT 0,
+  error_message           TEXT
+);

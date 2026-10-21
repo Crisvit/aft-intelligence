@@ -70,21 +70,60 @@ app.get('/status', basicAuth, async (req, res) => {
 
 // Importa SOLO el catálogo/categorías/stock de AFT a hmt-db — no llama a
 // Shopify en ningún punto (ingestAft() no referencia el cliente de Shopify).
-// Bloqueo simple en memoria para evitar dos importaciones simultáneas.
-let aftImportRunning = false;
+// Corre en segundo plano (responde 202 de inmediato) con el progreso real
+// guardado en aft_import_runs, para no depender de un timeout HTTP largo
+// y para poder sondear el avance desde el dashboard.
+const IMPORT_STALE_MS = 2 * 60 * 60 * 1000; // una importación "running" más antigua que esto se considera un proceso interrumpido
 
 app.post('/api/aft-import', basicAuth, async (req, res) => {
-  if (aftImportRunning) {
-    return res.status(409).json({ ok: false, error: 'Ya hay una importación de AFT en curso.' });
-  }
-  aftImportRunning = true;
   try {
-    const result = await ingestAft();
-    res.json({ ok: true, ...result });
+    const { rows: enCursoRows } = await pool.query(
+      `SELECT id, started_at FROM aft_import_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`
+    );
+    if (enCursoRows.length) {
+      const enCurso = enCursoRows[0];
+      const antiguedadMs = Date.now() - new Date(enCurso.started_at).getTime();
+      if (antiguedadMs < IMPORT_STALE_MS) {
+        return res.status(409).json({ ok: false, error: 'Ya hay una importación de AFT en curso.', runId: enCurso.id });
+      }
+      await pool.query(
+        `UPDATE aft_import_runs SET status='error', finished_at=now(), error_message='Proceso interrumpido (reinicio del servicio o bloqueo de más de 2h)' WHERE id=$1`,
+        [enCurso.id]
+      );
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO aft_import_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ingestAft(runId)
+      .then(async () => {
+        await pool.query(`UPDATE aft_import_runs SET status='success', finished_at=now() WHERE id=$1`, [runId]);
+      })
+      .catch(async (e) => {
+        console.error('[aft-import] Error en la importación en segundo plano:', e.message);
+        await pool.query(
+          `UPDATE aft_import_runs SET status='error', finished_at=now(), error_message=$2 WHERE id=$1`,
+          [runId, e.message]
+        );
+      });
   } catch (e) {
+    console.error('[aft-import] Error al iniciar la importación:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Progreso/resultado de la última importación AFT, para el polling del dashboard.
+app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM aft_import_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[aft-import/estado] Error leyendo el progreso:', e.message);
     res.status(502).json({ ok: false, error: e.message });
-  } finally {
-    aftImportRunning = false;
   }
 });
 

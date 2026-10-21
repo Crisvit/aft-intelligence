@@ -31,10 +31,138 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+const BATCH_SIZE = 500;
+
+// Dedup determinista: gana la primera aparición. Para cada clave repetida
+// se registra si la fila descartada era idéntica a la que se conservó, o
+// si difería (en cuyo caso conviene revisar manualmente vía incidencias).
+function dedupPorClave(lista, claveFn) {
+  const vistos = new Map();
+  const resultado = [];
+  const duplicados = [];
+  for (const item of lista) {
+    const clave = claveFn(item);
+    if (clave === null || clave === undefined || String(clave).trim() === '') continue;
+    if (vistos.has(clave)) {
+      const idéntico = JSON.stringify(vistos.get(clave)) === JSON.stringify(item);
+      duplicados.push({ clave, idéntico });
+      continue;
+    }
+    vistos.set(clave, item);
+    resultado.push(item);
+  }
+  return { resultado, duplicados };
+}
+
+// Construye un INSERT ... ON CONFLICT ... DO UPDATE multi-fila para `numFilas`
+// filas de `columnas` columnas, añadiendo una columna de timestamp final con now().
+function construirInsertMultiple(tabla, columnas, conflictCol, numFilas, colTimestamp) {
+  const nCols = columnas.length;
+  const grupos = [];
+  for (let i = 0; i < numFilas; i++) {
+    const placeholders = columnas.map((_, c) => `$${i * nCols + c + 1}`);
+    grupos.push(`(${placeholders.join(',')}, now())`);
+  }
+  const setClause = columnas
+    .filter((c) => c !== conflictCol)
+    .map((c) => `${c}=EXCLUDED.${c}`)
+    .join(', ');
+  return `INSERT INTO ${tabla} (${columnas.join(',')}, ${colTimestamp})
+          VALUES ${grupos.join(', ')}
+          ON CONFLICT (${conflictCol}) DO UPDATE SET ${setClause}, ${colTimestamp}=now()`;
+}
+
+const COLS_CATEGORIAS = ['id_categoria', 'nombre', 'padre', 'url_img'];
+function valoresCategoria(c) {
+  return [String(c.id), c.nombre, c.padre != null ? String(c.padre) : null, c.urL_IMG_CAT || c.url_img || null];
+}
+
+const COLS_PRODUCTOS = [
+  'ref', 'ean', 'marca', 'categoria_id', 'categoria_nombre', 'descripcion_corta', 'descripcion_larga',
+  'peso_gr', 'alto_cm', 'ancho_cm', 'largo_cm', 'portes', 'tipo_iva', 'por_iva'
+];
+function valoresProducto(p, catNombreMap) {
+  return [
+    p.ref, p.ean, p.marca, p.categorias != null ? String(p.categorias) : null,
+    catNombreMap[String(p.categorias)] || null, p.descripcioN_CORTA, p.descripcioN_LARGA,
+    p.pesO_GR, p.altO_CM, p.anchO_CM, p.largO_CM, p.portes, p.tipO_IVA, p.poR_IVA
+  ];
+}
+
+const COLS_STOCK = ['ref', 'costo', 'pvp_sin_iva', 'stock', 'fecha_ultimo_cambio_aft'];
+function valoresStock(s) {
+  const pvpSinIva = s.pvP_SINIVA != null ? s.pvP_SINIVA : s.pvp_siniva;
+  return [s.ref, s.costo, pvpSinIva, s.stock, s.fechA_ULTIMO_CAMBIO ? new Date(s.fechA_ULTIMO_CAMBIO) : null];
+}
+
+async function actualizarProgresoImport(runId, campos) {
+  if (!runId) return;
+  const claves = Object.keys(campos);
+  if (claves.length === 0) return;
+  const sets = claves.map((k, i) => `${k}=$${i + 2}`).join(', ');
+  await pool.query(`UPDATE aft_import_runs SET ${sets} WHERE id=$1`, [runId, ...claves.map((k) => campos[k])]);
+}
+
+// Procesa `items` en lotes de BATCH_SIZE con upsert multi-fila. Si un lote
+// falla (una fila con dato inválido, violación de tipo, etc.), ese lote se
+// reintenta fila a fila para aislar e identificar exactamente cuál falla,
+// sin perder el resto de filas correctas del lote ni de los lotes ya
+// confirmados. Cada lote/fila vive en su propia transacción corta: nunca
+// hay una única transacción gigante que pueda hacer ROLLBACK de todo.
+async function procesarEnLotes(client, items, { tabla, columnas, conflictCol, colTimestamp, valoresFn, claveErrorFn, tipo, runId, campoInsertados }) {
+  let insertados = 0;
+  let erroresSql = 0;
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const lote = items.slice(i, i + BATCH_SIZE);
+    await client.query('BEGIN');
+    try {
+      const sql = construirInsertMultiple(tabla, columnas, conflictCol, lote.length, colTimestamp);
+      await client.query(sql, lote.flatMap(valoresFn));
+      await client.query('COMMIT');
+      insertados += lote.length;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      console.error(`[ingestAft] Fallo el lote de ${tipo} (filas ${i}-${i + lote.length - 1}): ${e.message}. Reintentando fila a fila.`);
+      for (const item of lote) {
+        await client.query('BEGIN');
+        try {
+          const sqlUna = construirInsertMultiple(tabla, columnas, conflictCol, 1, colTimestamp);
+          await client.query(sqlUna, valoresFn(item));
+          await client.query('COMMIT');
+          insertados++;
+        } catch (e2) {
+          await client.query('ROLLBACK');
+          erroresSql++;
+          const clave = claveErrorFn(item);
+          console.error(`[ingestAft] Error SQL en ${tipo} (${clave}): ${e2.message}`);
+          await registrarIncidencia(clave, null, `error_sql_${tipo}`, e2.message);
+        }
+      }
+    }
+    await actualizarProgresoImport(runId, { fase: tipo, [campoInsertados]: insertados });
+  }
+  return { insertados, erroresSql };
+}
+
 // ---------------------------------------------------------------------------
 // 1. Ingesta AFT (catálogo, categorías, stock/precios) -> hmt-db
+//
+// Diseño (ver incidencias.tipo para el detalle de cada caso detectado):
+// - Deduplicación determinista por ref/id (gana la primera aparición),
+//   igual para categorías, productos y stock; cada duplicado queda
+//   registrado como incidencia, se conserven o no datos idénticos.
+// - Las filas de stock cuya ref no tiene producto correspondiente en el
+//   catálogo ya deduplicado se omiten (no violan la FK) pero se registran
+//   como incidencia conservando la ref original.
+// - Inserción por lotes (BATCH_SIZE) con upsert, en vez de una única
+//   transacción gigante: un lote o fila con error no hace ROLLBACK de las
+//   filas ya confirmadas, y los reintentos son seguros (upsert idempotente).
+// - Si se pasa `runId`, el progreso se va escribiendo en aft_import_runs
+//   para que el dashboard pueda mostrarlo mientras corre en segundo plano.
 // ---------------------------------------------------------------------------
-async function ingestAft() {
+async function ingestAft(runId) {
+  await actualizarProgresoImport(runId, { fase: 'descargando' });
+
   const token = await aft.getAftToken();
   const [categorias, productos, stockPrecios] = await Promise.all([
     aft.getCategorias(token),
@@ -46,54 +174,88 @@ async function ingestAft() {
   const prodList = Array.isArray(productos) ? productos : (productos.items || productos.data || []);
   const stockList = Array.isArray(stockPrecios) ? stockPrecios : (stockPrecios.items || stockPrecios.data || []);
 
+  const { resultado: catDedup, duplicados: catDup } = dedupPorClave(catList, (c) => (c.id != null ? String(c.id) : null));
+  const { resultado: prodDedup, duplicados: prodDup } = dedupPorClave(prodList, (p) => p.ref);
+  const { resultado: stockDedup, duplicados: stockDup } = dedupPorClave(stockList, (s) => s.ref);
+
+  for (const d of catDup) {
+    await registrarIncidencia(null, null, 'categoria_duplicada', `id_categoria=${d.clave} duplicado en la respuesta de AFT (${d.idéntico ? 'datos idénticos, se ignoró la repetición' : 'datos distintos, se conservó la primera aparición'})`);
+  }
+  for (const d of prodDup) {
+    await registrarIncidencia(d.clave, null, 'producto_duplicado', `ref=${d.clave} duplicado en el catálogo AFT (${d.idéntico ? 'datos idénticos, se ignoró la repetición' : 'datos distintos, se conservó la primera aparición'})`);
+  }
+  for (const d of stockDup) {
+    await registrarIncidencia(d.clave, null, 'stock_duplicado', `ref=${d.clave} duplicado en stock/precios AFT (${d.idéntico ? 'datos idénticos, se ignoró la repetición' : 'datos distintos, se conservó la primera aparición'})`);
+  }
+
+  const refsValidos = new Set(prodDedup.map((p) => p.ref));
+  const stockValido = [];
+  const stockHuerfano = [];
+  for (const s of stockDedup) {
+    if (refsValidos.has(s.ref)) stockValido.push(s);
+    else stockHuerfano.push(s);
+  }
+  for (const s of stockHuerfano) {
+    await registrarIncidencia(s.ref, null, 'stock_sin_correspondencia', `Fila de stock con ref=${s.ref} no tiene producto correspondiente en el catálogo; se omite su importación pero se conserva la ref en esta incidencia.`);
+  }
+
+  const catNombreMap = {};
+  for (const c of catDedup) catNombreMap[String(c.id)] = normalizar(c.nombre);
+
+  await actualizarProgresoImport(runId, {
+    fase: 'categorias',
+    total_categorias: catDedup.length,
+    categorias_duplicadas: catDup.length,
+    total_productos: prodDedup.length,
+    productos_duplicados: prodDup.length,
+    total_stock: stockValido.length,
+    stock_duplicado: stockDup.length,
+    stock_huerfano: stockHuerfano.length,
+    incidencias: catDup.length + prodDup.length + stockDup.length + stockHuerfano.length
+  });
+
   const client = await pool.connect();
+  let categoriasResult, productosResult, stockResult;
   try {
-    await client.query('BEGIN');
-    for (const c of catList) {
-      await client.query(
-        `INSERT INTO aft_categorias (id_categoria, nombre, padre, url_img, ultima_sync)
-         VALUES ($1,$2,$3,$4, now())
-         ON CONFLICT (id_categoria) DO UPDATE SET nombre=$2, padre=$3, url_img=$4, ultima_sync=now()`,
-        [String(c.id), c.nombre, c.padre != null ? String(c.padre) : null, c.urL_IMG_CAT || c.url_img || null]
-      );
-    }
+    categoriasResult = await procesarEnLotes(client, catDedup, {
+      tabla: 'aft_categorias', columnas: COLS_CATEGORIAS, conflictCol: 'id_categoria', colTimestamp: 'ultima_sync',
+      valoresFn: valoresCategoria, claveErrorFn: (c) => `id_categoria=${c.id}`, tipo: 'categorias', runId, campoInsertados: 'categorias_insertadas'
+    });
 
-    const catNombreMap = {};
-    for (const c of catList) catNombreMap[String(c.id)] = normalizar(c.nombre);
+    await actualizarProgresoImport(runId, { fase: 'productos' });
+    productosResult = await procesarEnLotes(client, prodDedup, {
+      tabla: 'aft_catalogo', columnas: COLS_PRODUCTOS, conflictCol: 'ref', colTimestamp: 'ultima_sync',
+      valoresFn: (p) => valoresProducto(p, catNombreMap), claveErrorFn: (p) => `ref=${p.ref}`, tipo: 'productos', runId, campoInsertados: 'productos_insertados'
+    });
 
-    for (const p of prodList) {
-      await client.query(
-        `INSERT INTO aft_catalogo (ref, ean, marca, categoria_id, categoria_nombre, descripcion_corta, descripcion_larga, peso_gr, alto_cm, ancho_cm, largo_cm, portes, tipo_iva, por_iva, ultima_sync)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
-         ON CONFLICT (ref) DO UPDATE SET ean=$2, marca=$3, categoria_id=$4, categoria_nombre=$5,
-           descripcion_corta=$6, descripcion_larga=$7, peso_gr=$8, alto_cm=$9, ancho_cm=$10,
-           largo_cm=$11, portes=$12, tipo_iva=$13, por_iva=$14, ultima_sync=now()`,
-        [
-          p.ref, p.ean, p.marca, p.categorias != null ? String(p.categorias) : null,
-          catNombreMap[String(p.categorias)] || null, p.descripcioN_CORTA, p.descripcioN_LARGA,
-          p.pesO_GR, p.altO_CM, p.anchO_CM, p.largO_CM, p.portes, p.tipO_IVA, p.poR_IVA
-        ]
-      );
-    }
-
-    for (const s of stockList) {
-      const pvpSinIva = s.pvP_SINIVA != null ? s.pvP_SINIVA : s.pvp_siniva;
-      await client.query(
-        `INSERT INTO aft_stock_precios (ref, costo, pvp_sin_iva, stock, fecha_ultimo_cambio_aft, ultima_actualizacion_local)
-         VALUES ($1,$2,$3,$4,$5, now())
-         ON CONFLICT (ref) DO UPDATE SET costo=$2, pvp_sin_iva=$3, stock=$4, fecha_ultimo_cambio_aft=$5, ultima_actualizacion_local=now()`,
-        [s.ref, s.costo, pvpSinIva, s.stock, s.fechA_ULTIMO_CAMBIO ? new Date(s.fechA_ULTIMO_CAMBIO) : null]
-      );
-    }
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
+    await actualizarProgresoImport(runId, { fase: 'stock' });
+    stockResult = await procesarEnLotes(client, stockValido, {
+      tabla: 'aft_stock_precios', columnas: COLS_STOCK, conflictCol: 'ref', colTimestamp: 'ultima_actualizacion_local',
+      valoresFn: valoresStock, claveErrorFn: (s) => `ref=${s.ref}`, tipo: 'stock', runId, campoInsertados: 'stock_insertado'
+    });
   } finally {
     client.release();
   }
 
-  return { categorias: catList.length, productos: prodList.length, stockPrecios: stockList.length };
+  const totalErroresSql = categoriasResult.erroresSql + productosResult.erroresSql + stockResult.erroresSql;
+  const totalIncidencias = catDup.length + prodDup.length + stockDup.length + stockHuerfano.length + totalErroresSql;
+
+  await actualizarProgresoImport(runId, {
+    fase: 'done',
+    categorias_insertadas: categoriasResult.insertados,
+    productos_insertados: productosResult.insertados,
+    stock_insertado: stockResult.insertados,
+    errores_sql: totalErroresSql,
+    incidencias: totalIncidencias
+  });
+
+  return {
+    categorias: { recibidos: catList.length, insertados: categoriasResult.insertados, duplicados: catDup.length },
+    productos: { recibidos: prodList.length, insertados: productosResult.insertados, duplicados: prodDup.length },
+    stockPrecios: { recibidos: stockList.length, insertados: stockResult.insertados, duplicados: stockDup.length, sinCorrespondencia: stockHuerfano.length },
+    erroresSql: totalErroresSql,
+    incidencias: totalIncidencias
+  };
 }
 
 // ---------------------------------------------------------------------------
