@@ -6,7 +6,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
-const { runInventorySync } = require('./src/sync');
+const { runInventorySync, ingestAft } = require('./src/sync');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -66,6 +66,26 @@ app.get('/status', basicAuth, async (req, res) => {
     result.shopify = { ok: false, error: e.message };
   }
   res.json(result);
+});
+
+// Importa SOLO el catálogo/categorías/stock de AFT a hmt-db — no llama a
+// Shopify en ningún punto (ingestAft() no referencia el cliente de Shopify).
+// Bloqueo simple en memoria para evitar dos importaciones simultáneas.
+let aftImportRunning = false;
+
+app.post('/api/aft-import', basicAuth, async (req, res) => {
+  if (aftImportRunning) {
+    return res.status(409).json({ ok: false, error: 'Ya hay una importación de AFT en curso.' });
+  }
+  aftImportRunning = true;
+  try {
+    const result = await ingestAft();
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  } finally {
+    aftImportRunning = false;
+  }
 });
 
 // Lanza una comparación real AFT <-> Shopify, solo lectura. Nunca escribe
