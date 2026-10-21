@@ -22,6 +22,7 @@ const FREE_SHIPPING_THRESHOLD = 30;
 const SHIPPING_HERRAMITIENDA = 4.41;
 const IVA_RECARGO_MAP = { 21: 5.2, 10: 1.4, 4: 0.5 };
 const MAIN_LOCATION_ID = process.env.SHOPIFY_MAIN_LOCATION_ID || 'gid://shopify/Location/102229836040';
+const SHOPIFY_PAGE_SIZE = Number(process.env.SHOPIFY_VARIANTS_PAGE_SIZE) || 25;
 
 function normalizar(s) {
   return String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -368,17 +369,58 @@ function combinarConShopify(fuente, graphqlResult, matchedBy) {
   };
 }
 
+// Acumula las variantes de una página de getAllVariants() en dos mapas
+// (por barcode y por sku), cada clave con un array de nodos — igual que una
+// respuesta de búsqueda de Shopify con varias coincidencias, para poder
+// seguir detectando ambigüedad (edges.length > 1) exactamente igual que antes.
+function indexarVariantes(edges, mapaPorBarcode, mapaPorSku) {
+  for (const edge of edges) {
+    const node = edge.node;
+    if (node.barcode != null && String(node.barcode).trim() !== '') {
+      const clave = String(node.barcode).trim();
+      if (!mapaPorBarcode.has(clave)) mapaPorBarcode.set(clave, []);
+      mapaPorBarcode.get(clave).push(node);
+    }
+    if (node.sku != null && String(node.sku).trim() !== '') {
+      const clave = String(node.sku).trim();
+      if (!mapaPorSku.has(clave)) mapaPorSku.set(clave, []);
+      mapaPorSku.get(clave).push(node);
+    }
+  }
+}
+
+// Da a combinarConShopify() la misma forma de datos que ya espera (un
+// resultado GraphQL de productVariants con edges), pero construida a partir
+// del mapa en memoria en vez de una búsqueda de red por referencia. Así
+// combinarConShopify() no se modifica.
+function edgesDesdeMapa(mapa, clave) {
+  const nodos = (clave != null ? mapa.get(String(clave).trim()) : null) || [];
+  return { data: { productVariants: { edges: nodos.map((node) => ({ node })) } } };
+}
+
 // ---------------------------------------------------------------------------
 // 4. Ejecuta la comparación completa AFT <-> Shopify (SOLO LECTURA) y guarda
 //    el resultado (diferencias + incidencias + resumen) en hmt-db.
+//
+// La lectura de Shopify ya no es una búsqueda por cada referencia AFT: se
+// pagina UNA VEZ todo productVariants (ver shopify.getAllVariants) y se
+// indexa en memoria por barcode/sku. El matching contra AFT nunca se
+// considera definitivo hasta que esa paginación termina del todo
+// (hasNextPage = false en la última página) — si falla a mitad, el run se
+// marca como error y no se toca shopify_match con datos parciales.
 // ---------------------------------------------------------------------------
-async function runInventorySync() {
+async function runInventorySync(existingRunId) {
   const startedAt = new Date();
-  const { rows: runRows } = await pool.query(
-    `INSERT INTO sync_runs (started_at, status) VALUES ($1, 'running') RETURNING id`,
-    [startedAt]
-  );
-  const runId = runRows[0].id;
+  let runId = existingRunId;
+  if (runId) {
+    await pool.query(`UPDATE sync_runs SET fase = 'leyendo_shopify' WHERE id = $1`, [runId]);
+  } else {
+    const { rows: runRows } = await pool.query(
+      `INSERT INTO sync_runs (started_at, status, fase) VALUES ($1, 'running', 'leyendo_shopify') RETURNING id`,
+      [startedAt]
+    );
+    runId = runRows[0].id;
+  }
 
   const counters = { matched: 0, cambiarian: 0, aCero: 0, sinCambio: 0, incidencias: 0, noEncontrados: 0 };
 
@@ -386,6 +428,39 @@ async function runInventorySync() {
     await ingestAft();
     const candidatos = await getCandidatosConCoste();
     const shopifyToken = await shopify.getShopifyToken();
+
+    const mapaPorBarcode = new Map();
+    const mapaPorSku = new Map();
+
+    const lectura = await shopify.getAllVariants(shopifyToken, {
+      pageSize: SHOPIFY_PAGE_SIZE,
+      onPage: async (edges, info) => {
+        indexarVariantes(edges, mapaPorBarcode, mapaPorSku);
+        await pool.query(
+          `UPDATE sync_runs SET shopify_paginas_leidas = $2, shopify_variantes_leidas = $3 WHERE id = $1`,
+          [runId, info.pagina, info.totalVariantes]
+        );
+      }
+    });
+
+    if (lectura.permisosFaltantes.length) {
+      await pool.query(
+        `UPDATE sync_runs SET permisos_incompletos = true, permisos_detalle = $2 WHERE id = $1`,
+        [runId, lectura.permisosFaltantes.join(' | ').slice(0, 2000)]
+      );
+      for (const detalle of lectura.permisosFaltantes) {
+        await registrarIncidencia(null, null, 'permiso_shopify_faltante', detalle);
+        counters.incidencias++;
+      }
+    }
+
+    // Lectura de Shopify completa y confirmada (getAllVariants solo devuelve
+    // el control cuando pageInfo.hasNextPage ha sido false) — a partir de
+    // aquí el matching ya puede considerarse definitivo.
+    await pool.query(
+      `UPDATE sync_runs SET fase = 'comparando', shopify_lectura_completa = true WHERE id = $1`,
+      [runId]
+    );
 
     await pool.query('DELETE FROM shopify_match');
 
@@ -396,11 +471,11 @@ async function runInventorySync() {
         continue;
       }
 
-      let resultado = combinarConShopify(fuente, await shopify.findVariantByBarcode(shopifyToken, fuente.ean), 'ean');
+      let resultado = combinarConShopify(fuente, edgesDesdeMapa(mapaPorBarcode, fuente.ean), 'ean');
 
       if (!resultado) {
         // Fallback por SKU/referencia, solo cuando el EAN no encontró nada.
-        resultado = combinarConShopify(fuente, await shopify.findVariantBySku(shopifyToken, fuente.ref), 'sku');
+        resultado = combinarConShopify(fuente, edgesDesdeMapa(mapaPorSku, fuente.ref), 'sku');
       }
 
       if (!resultado) {
@@ -454,16 +529,23 @@ async function runInventorySync() {
     }
 
     await pool.query(
-      `UPDATE sync_runs SET finished_at = now(), status = 'success',
+      `UPDATE sync_runs SET finished_at = now(), status = 'success', fase = 'done',
          total_aft_candidatos = $2, total_matched = $3, total_cambiarian = $4, total_a_cero = $5,
          total_sin_cambio = $6, total_incidencias = $7, total_no_encontrados = $8
        WHERE id = $1`,
       [runId, candidatos.length, counters.matched, counters.cambiarian, counters.aCero, counters.sinCambio, counters.incidencias, counters.noEncontrados]
     );
 
-    return { runId, totalCandidatos: candidatos.length, ...counters };
+    return {
+      runId, totalCandidatos: candidatos.length,
+      shopify: { paginas: lectura.paginas, variantesLeidas: lectura.totalVariantes, lecturaCompleta: true, permisosFaltantes: lectura.permisosFaltantes },
+      ...counters
+    };
   } catch (e) {
-    await pool.query(`UPDATE sync_runs SET finished_at = now(), status = 'error', error_message = $2 WHERE id = $1`, [runId, e.message]);
+    await pool.query(
+      `UPDATE sync_runs SET finished_at = now(), status = 'error', fase = 'error', error_message = $2 WHERE id = $1`,
+      [runId, e.message]
+    );
     throw e;
   }
 }

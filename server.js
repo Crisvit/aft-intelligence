@@ -128,12 +128,51 @@ app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
 });
 
 // Lanza una comparación real AFT <-> Shopify, solo lectura. Nunca escribe
-// en Shopify — no existe ningún endpoint ni función que lo haga.
+// en Shopify — no existe ningún endpoint ni función que lo haga. Corre en
+// segundo plano (202 inmediato) porque ahora pagina todo el catálogo de
+// Shopify antes de comparar; el progreso real se sigue en sync_runs.
+const SYNC_STALE_MS = 2 * 60 * 60 * 1000; // una sincronización "running" más antigua que esto se considera un proceso interrumpido
+
 app.post('/api/sync-run', basicAuth, async (req, res) => {
   try {
-    const result = await runInventorySync();
-    res.json({ ok: true, ...result });
+    const { rows: enCursoRows } = await pool.query(
+      `SELECT id, started_at FROM sync_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`
+    );
+    if (enCursoRows.length) {
+      const enCurso = enCursoRows[0];
+      const antiguedadMs = Date.now() - new Date(enCurso.started_at).getTime();
+      if (antiguedadMs < SYNC_STALE_MS) {
+        return res.status(409).json({ ok: false, error: 'Ya hay una sincronización Shopify en curso.', runId: enCurso.id });
+      }
+      await pool.query(
+        `UPDATE sync_runs SET status='error', finished_at=now(), fase='error', error_message='Proceso interrumpido (reinicio del servicio o bloqueo de más de 2h)' WHERE id=$1`,
+        [enCurso.id]
+      );
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO sync_runs (started_at, status, fase) VALUES (now(), 'running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    runInventorySync(runId).catch((e) => {
+      console.error('[sync-run] Error en la sincronización en segundo plano:', e.message);
+    });
   } catch (e) {
+    console.error('[sync-run] Error al iniciar la sincronización:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Progreso/resultado de la última sincronización Shopify, para polling.
+app.get('/api/sync-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[sync-run/estado] Error leyendo el progreso:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });

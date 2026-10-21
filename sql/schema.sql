@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   error_message      TEXT
 );
 
+-- Progreso de la lectura paginada completa del catálogo de Shopify dentro de
+-- cada sync_run (ver src/sync.js). shopify_lectura_completa solo se pone a
+-- true cuando se ha terminado de paginar TODO productVariants (hasNextPage
+-- = false en la última página) — el matching nunca se considera definitivo
+-- antes de eso. permisos_incompletos/permisos_detalle registran campos a los
+-- que la app no tiene acceso (p.ej. falta el scope read_locations) en vez de
+-- inventar el dato que falta.
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS fase TEXT;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS shopify_paginas_leidas INTEGER DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS shopify_variantes_leidas INTEGER DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS shopify_lectura_completa BOOLEAN DEFAULT false;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS permisos_incompletos BOOLEAN DEFAULT false;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS permisos_detalle TEXT;
+
 CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,
   ref            TEXT,
