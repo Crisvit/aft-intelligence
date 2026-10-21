@@ -17,13 +17,25 @@ muestra como activo si no lo está (ver "Qué no está conectado todavía").
   Shopify leídas, coincidencias, cambios de stock/precio propuestos,
   propuestas a stock cero, incidencias), alertas destacadas cuando hay algo
   que revisar, y un resumen de actividad e integraciones.
-- **Coincidencias**: tabla con buscador y filtro por estado de todas las
-  referencias que AFT y Shopify tienen en común — stock en AFT, stock en
-  Shopify, diferencia, coste AFT (sin IVA y con impuestos), coste registrado
-  en Shopify y PVP de ambos.
+- **Coincidencias**: tabla con buscador y filtro por estado de las
+  referencias que AFT y Shopify tienen en común — **solo coincidencias
+  fiables** (emparejadas por EAN, o por SKU cuando es inequívoco). Muestra
+  la marca real del catálogo AFT (nunca el vendor de Shopify), cómo se
+  encontró cada coincidencia (EAN/SKU), stock en AFT, stock en Shopify,
+  diferencia, coste AFT (sin IVA y con impuestos), coste registrado en
+  Shopify y PVP de ambos. Las coincidencias ambiguas (EAN duplicado,
+  múltiples ubicaciones) no aparecen aquí — se gestionan como incidencia.
 - **Oportunidades**: referencias de tus marcas/categorías comerciales que
-  AFT tiene en stock y la última sincronización no encontró en Shopify.
-- **Productos**: catálogo real de Shopify (solo lectura).
+  AFT tiene en stock y la última sincronización no encontró en Shopify,
+  priorizando Wolfpack/Samurai/Maurer/Papillon/Saturnia (configurable vía
+  `AFT_BRANDS_PRIORITARIAS`).
+- **Productos**: catálogo completo de Shopify (todas las variantes, solo
+  lectura) con 4 filtros independientes — proveedor identificado, marca
+  (vendor de Shopify), estado (activo/borrador/archivado) y disponibilidad.
+  "Proveedor: AFT" solo aparece cuando hubo una coincidencia fiable por
+  EAN/SKU con el catálogo AFT; el resto se marca "Sin identificar" — nunca
+  se adivina a partir del vendor de Shopify (que puede traer valores que no
+  son marcas, como textos de envío) ni por similitud de nombre.
 - **Actividad**: historial de ejecuciones e incidencias registradas.
 - **Integraciones**: estado real de los dos procesos que sí funcionan
   (importación AFT, comparación Shopify ↔ AFT) con botón para lanzarlos y

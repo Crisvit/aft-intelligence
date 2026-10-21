@@ -6,7 +6,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
-const { runInventorySync, ingestAft } = require('./src/sync');
+const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS } = require('./src/sync');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -210,16 +210,20 @@ async function renderDashboard() {
      FROM sync_runs ORDER BY started_at DESC LIMIT 20`
   );
 
-  // Coincidencias reales: todo lo que la última comparación emparejó con
-  // Shopify (cambios propuestos, a stock cero, sin cambios, e incidencias
-  // bloqueadas) — nunca las "no encontrado", esas son otra cosa (oportunidades).
+  // Coincidencias reales y FIABLES: solo lo que el matching por EAN/SKU
+  // emparejó sin ambigüedad (cambios propuestos, a stock cero, sin cambios).
+  // Las coincidencias ambiguas (EAN duplicado, múltiples ubicaciones, SKU no
+  // inequívoco) quedan fuera a propósito — esas se gestionan como incidencia,
+  // no como una coincidencia fiable. La marca mostrada es la de aft_catalogo
+  // (AFT real), nunca el vendor de Shopify.
   const { rows: matchRows } = await pool.query(
-    `SELECT sm.ref, c.descripcion_corta AS descripcion, sm.stock_aft, sm.shopify_stock, sm.stock_diferencia,
+    `SELECT sm.ref, c.descripcion_corta AS descripcion, c.marca AS marca_aft, sm.matched_by,
+            sm.stock_aft, sm.shopify_stock, sm.stock_diferencia,
             sm.coste_aft_sin_iva, sm.coste_aft_con_impuestos, sm.shopify_cost, sm.shopify_price,
             sm.precio_venta_aft, sm.estado
      FROM shopify_match sm
      LEFT JOIN aft_catalogo c ON c.ref = sm.ref
-     WHERE sm.estado IN ('cambiaria','a_cero','sin_cambio','incidencia')
+     WHERE sm.estado IN ('cambiaria','a_cero','sin_cambio')
      ORDER BY sm.estado, sm.ref`
   );
 
@@ -230,27 +234,42 @@ async function renderDashboard() {
   // Oportunidades reales: referencias AFT de marcas/categorías comerciales
   // que el último control de inventario NO encontró en Shopify (prioridad 2
   // — separado del control de inventario, que cruza TODAS las referencias).
-  const { rows: oportunidadRows } = await pool.query(
+  // Se priorizan Wolfpack/Samurai/Maurer/Papillon/Saturnia (configurable vía
+  // AFT_BRANDS_PRIORITARIAS), y dentro de cada grupo, por margen.
+  const { rows: oportunidadRowsRaw } = await pool.query(
     `SELECT sm.ref, sm.ean, sm.marca, c.descripcion_corta AS descripcion, sm.stock_aft AS stock,
             sm.precio_venta_aft AS precio, sm.coste_para_margen AS coste,
             sm.margen_con_precio_aft_pct AS "margenPct"
      FROM shopify_match sm
      JOIN aft_catalogo c ON c.ref = sm.ref
      WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true
-     ORDER BY sm.margen_con_precio_aft_pct DESC NULLS LAST
-     LIMIT 200`
+     LIMIT 500`
+  );
+  const esPrioritaria = (marca) => BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
+  const oportunidadRows = oportunidadRowsRaw.slice().sort((a, b) => {
+    const prioA = esPrioritaria(a.marca) ? 1 : 0;
+    const prioB = esPrioritaria(b.marca) ? 1 : 0;
+    if (prioA !== prioB) return prioB - prioA;
+    return (Number(b.margenPct) || 0) - (Number(a.margenPct) || 0);
+  }).slice(0, 200);
+
+  // Catálogo completo de Shopify (todas las variantes, ya leídas por
+  // getAllVariants y guardadas por runInventorySync) cruzado con el
+  // matching real para identificar el proveedor — nunca por vendor ni por
+  // similitud de nombre. Si no hay coincidencia fiable, se marca "sin
+  // identificar": no se adivina ni se etiqueta como ningún otro proveedor.
+  const { rows: productosShopify } = await pool.query(
+    `SELECT sc.shopify_variant_id, sc.titulo, sc.vendor_shopify, sc.estado, sc.sku, sc.barcode,
+            sc.precio, sc.stock_ubicacion_principal AS stock, sc.imagen_url,
+            sm.ref AS aft_ref
+     FROM shopify_catalogo sc
+     LEFT JOIN shopify_match sm
+       ON sm.shopify_variant_id = sc.shopify_variant_id AND sm.estado IN ('cambiaria','a_cero','sin_cambio')
+     ORDER BY sc.titulo NULLS LAST, sc.shopify_variant_id`
   );
 
-  let shopifyProductsRaw = { data: { products: { edges: [] } } };
-  try {
-    const token = await shopify.getShopifyToken();
-    shopifyProductsRaw = await shopify.listProducts(token);
-  } catch (e) {
-    console.error('[dashboard] No se pudo leer productos de Shopify:', e.message);
-  }
-
   const html = buildDashboardHtml({
-    shopifyProductsRaw, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows
+    productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows
   });
 
   cache = { html, builtAt: now };

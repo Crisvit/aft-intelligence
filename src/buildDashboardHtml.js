@@ -5,7 +5,7 @@
 // existen en este repositorio. Lo que no está conectado todavía se señala
 // como tal en la página "Integraciones", no se oculta ni se simula.
 function buildDashboardHtml({
-  shopifyProductsRaw,
+  productosShopify,
   ultimoSync,
   ultimaImport,
   matchRows,
@@ -58,14 +58,18 @@ function aftUrl(ref){ return 'https://www.aftgrupo.com/productos/ref-' + ref; }
 const SHOPIFY_ADMIN_PRODUCTS = 'https://admin.shopify.com/store/kb9i0z-da/products';
 
 // --- Datos reales, sin inventar nada ---
-const shopifyProducts = ((shopifyProductsRaw && shopifyProductsRaw.data && shopifyProductsRaw.data.products && shopifyProductsRaw.data.products.edges) || []).map(e => {
-  const v = (e.node.variants.edges[0] || {}).node || {};
-  return {
-    id: e.node.id, titulo: e.node.title, marca: e.node.vendor, estado: e.node.status,
-    imagen: e.node.featuredMedia && e.node.featuredMedia.preview ? e.node.featuredMedia.preview.image.url : null,
-    precio: v.price ? parseFloat(v.price) : null, stock: v.inventoryQuantity, sku: v.sku
-  };
-});
+// productosShopify ya viene de hmt-db (shopify_catalogo, todas las variantes
+// leídas por getAllVariants) cruzado con el matching real contra AFT
+// (shopify_match). "proveedor" solo puede ser "AFT" (si hubo coincidencia
+// fiable por EAN/SKU) o "Sin identificar" — nunca se adivina a partir del
+// vendor de Shopify ni por similitud de nombre.
+const shopifyProducts = (productosShopify || []).map(p => ({
+  id: p.shopify_variant_id, titulo: p.titulo, vendorShopify: p.vendor_shopify, estado: p.estado,
+  imagen: p.imagen_url, precio: p.precio != null ? Number(p.precio) : null, stock: p.stock,
+  sku: p.sku, barcode: p.barcode,
+  proveedor: p.aft_ref ? ('AFT (ref ' + p.aft_ref + ')') : 'Sin identificar',
+  esAft: !!p.aft_ref
+}));
 
 const stockCeroRows = matchRows.filter(r => r.estado === 'a_cero');
 const incidenciaMatchRows = matchRows.filter(r => r.estado === 'incidencia');
@@ -129,16 +133,19 @@ const timelineHtmlResumen = eventos.length
   ? eventos.slice(0, 6).map(e => tlRow(e.texto, e.ts, e.color)).join('')
   : '<div class="empty-state">Aún no hay actividad registrada.</div>';
 
-// --- Página Coincidencias (buscador + filtro por estado) ---
+// --- Página Coincidencias: SOLO matching fiable por EAN/SKU (nunca
+//     ambiguo — ver filtro WHERE en server.js), marca tomada de AFT. ---
 const ESTADO_BADGE = {
   cambiaria: '<span class="badge badge-warn">Cambio propuesto</span>',
   a_cero: '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">A stock cero</span>',
-  sin_cambio: '<span class="badge badge-ok">Sin cambios</span>',
-  incidencia: '<span class="badge badge-off" style="background:#FFFBEB;color:#D97706;">Incidencia — revisar</span>'
+  sin_cambio: '<span class="badge badge-ok">Sin cambios</span>'
 };
+const MATCHED_BY_LABEL = { ean: 'EAN', sku: 'SKU' };
 function filaCoincidencia(r){
   return '<tr data-ref="' + esc((r.ref||'').toLowerCase()) + '" data-nombre="' + esc((r.descripcion||'').toLowerCase()) + '" data-estado="' + esc(r.estado) + '">' +
     '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + '</div></td>' +
+    '<td data-label="Marca (AFT)">' + esc(titleCase(r.marca_aft || '')) + '</td>' +
+    '<td data-label="Coincide por">' + (MATCHED_BY_LABEL[r.matched_by] || esc(r.matched_by || '')) + '</td>' +
     '<td class="num" data-label="Stock AFT">' + num(r.stock_aft) + '</td>' +
     '<td class="num" data-label="Stock Shopify">' + num(r.shopify_stock) + '</td>' +
     '<td class="num" data-label="Diferencia">' + num(r.stock_diferencia) + '</td>' +
@@ -158,11 +165,10 @@ const coincidenciasHtml = matchRows.length
         '<option value="cambiaria">Cambio propuesto</option>' +
         '<option value="a_cero">A stock cero</option>' +
         '<option value="sin_cambio">Sin cambios</option>' +
-        '<option value="incidencia">Incidencia</option>' +
       '</select>' +
     '</div>' +
-    '<div class="table-note" id="contadorCoincidencias">Mostrando ' + matchRows.length + ' de ' + pl(matchRows.length, 'coincidencia', 'coincidencias') + '.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
+    '<div class="table-note" id="contadorCoincidencias">Mostrando ' + matchRows.length + ' de ' + pl(matchRows.length, 'coincidencia fiable', 'coincidencias fiables') + ' (emparejadas por EAN o SKU inequívoco). Las coincidencias ambiguas no se muestran aquí — se gestionan como incidencia (ver Actividad).</div>' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca (AFT)</th><th>Coincide por</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
     matchRows.map(filaCoincidencia).join('') +
     '</tbody></table></div>' +
     '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste registrado en Shopify se muestra tal cual está en la ficha — su tratamiento de IVA está pendiente de validar, por eso no se calcula una "diferencia de coste" automática entre AFT y Shopify.</p>'
@@ -193,23 +199,48 @@ const oportunidadesHtml = oportunidadRows.length
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
 
-// --- Página Productos (catálogo real de Shopify, solo lectura) ---
+// --- Página Productos: catálogo COMPLETO de Shopify (todas las variantes,
+//     no solo 100 productos ni la primera variante), con 4 filtros
+//     independientes. "Proveedor" viene solo del matching real por EAN/SKU
+//     contra AFT — nunca del vendor de Shopify (vendor_shopify se muestra
+//     aparte, como dato informativo, nunca como criterio de identificación).
+//     Los productos sin coincidencia fiable se marcan "Sin identificar",
+//     nunca se adivina ni se etiqueta como un proveedor concreto. ---
+const ESTADO_PRODUCTO_LABEL = { ACTIVE: 'Activo', DRAFT: 'Borrador', ARCHIVED: 'Archivado' };
+function badgeEstadoProducto(estado){
+  if (estado === 'DRAFT') return '<span class="badge badge-off">Borrador</span>';
+  if (estado === 'ARCHIVED') return '<span class="badge badge-off">Archivado</span>';
+  return '<span class="badge badge-ok">Activo</span>';
+}
 function filaProducto(p){
-  const badge = p.estado !== 'ACTIVE' ? '<span class="badge badge-off">Borrador</span>' : (p.stock === 0 ? '<span class="badge badge-warn">Sin stock</span>' : '<span class="badge badge-ok">Activo</span>');
   const img = p.imagen ? '<img src="' + p.imagen + '" style="width:32px;height:32px;object-fit:contain;border-radius:6px;background:#F1F2F4;"/>' : '<div style="width:32px;height:32px;border-radius:6px;background:#F1F2F4;"></div>';
   const numId = (p.id || '').split('/').pop();
   const shopifyUrl = SHOPIFY_ADMIN_PRODUCTS + '/' + numId;
-  return '<tr class="row-clickable" data-nombre="' + esc((p.titulo||'').toLowerCase()) + '" data-marca="' + esc(p.marca || '') + '" onclick="window.open(\'' + shopifyUrl + '\',\'_blank\')">' +
-    '<td data-label="">' + img + '</td><td data-label="Producto">' + esc(p.titulo) + '</td><td data-label="Marca">' + esc(p.marca) + '</td>' +
-    '<td class="num" data-label="Precio">' + eur(p.precio) + '</td><td class="num" data-label="Stock">' + (p.stock == null ? '—' : p.stock) + '</td><td data-label="Estado">' + badge + '</td></tr>';
+  const disponibilidad = p.stock > 0 ? 'con_stock' : 'sin_stock';
+  return '<tr class="row-clickable" data-nombre="' + esc((p.titulo||'').toLowerCase()) + '" data-vendor="' + esc(p.vendorShopify || '') + '" data-estado="' + esc(p.estado || '') + '" data-proveedor="' + (p.esAft ? 'aft' : 'sin_identificar') + '" data-disponibilidad="' + disponibilidad + '" onclick="window.open(\'' + shopifyUrl + '\',\'_blank\')">' +
+    '<td data-label="">' + img + '</td>' +
+    '<td data-label="Producto">' + esc(p.titulo) + '<div style="font-size:11px;color:var(--sub);">' + esc(p.sku || '') + '</div></td>' +
+    '<td data-label="Proveedor">' + (p.esAft ? '<span class="badge badge-ok">' + esc(p.proveedor) + '</span>' : '<span class="badge badge-off">Sin identificar</span>') + '</td>' +
+    '<td data-label="Marca (Shopify)">' + esc(p.vendorShopify || '—') + '</td>' +
+    '<td class="num" data-label="Precio">' + eur(p.precio) + '</td>' +
+    '<td class="num" data-label="Stock">' + (p.stock == null ? '—' : p.stock) + '</td>' +
+    '<td data-label="Estado">' + badgeEstadoProducto(p.estado) + '</td></tr>';
 }
-const marcasProd = Array.from(new Set(shopifyProducts.map(p => p.marca).filter(Boolean))).sort();
-const productosHtml = '<div class="filterbar"><input type="text" id="buscarProducto" class="filter-select" placeholder="Buscar por nombre..." style="flex:1;max-width:280px;" oninput="filtrarProductos()"/>' +
-  '<select id="filtroMarcaProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Todas las marcas</option>' + marcasProd.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select></div>' +
-  (shopifyProducts.length ? '<div class="table-note" id="contadorProductos">Mostrando ' + shopifyProducts.length + ' de ' + pl(shopifyProducts.length, 'producto', 'productos') + '.</div>' : '') +
-  '<div class="table-scroll"><table><thead><tr><th></th><th>Producto</th><th>Marca</th><th>Precio</th><th>Stock</th><th>Estado</th></tr></thead><tbody id="tablaProductosBody">' +
-  (shopifyProducts.length ? shopifyProducts.map(filaProducto).join('') : '<tr><td colspan="6" class="empty-state">No se encontraron productos de tus marcas en Shopify.</td></tr>') +
-  '</tbody></table></div>';
+const vendoresShopify = Array.from(new Set(shopifyProducts.map(p => p.vendorShopify).filter(Boolean))).sort();
+const productosHtml = shopifyProducts.length
+  ? '<div class="filterbar">' +
+      '<input type="text" id="buscarProducto" class="filter-select" placeholder="Buscar por nombre..." style="flex:1;max-width:220px;" oninput="filtrarProductos()"/>' +
+      '<select id="filtroProveedorProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Proveedor: todos</option><option value="aft">AFT</option><option value="sin_identificar">Sin identificar</option></select>' +
+      '<select id="filtroVendorProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Marca (Shopify): todas</option>' + vendoresShopify.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select>' +
+      '<select id="filtroEstadoProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Estado: todos</option><option value="ACTIVE">Activo</option><option value="DRAFT">Borrador</option><option value="ARCHIVED">Archivado</option></select>' +
+      '<select id="filtroDisponibilidadProducto" class="filter-select" onchange="filtrarProductos()"><option value="">Disponibilidad: todas</option><option value="con_stock">Con stock</option><option value="sin_stock">Sin stock</option></select>' +
+    '</div>' +
+    '<div class="table-note" id="contadorProductos">Mostrando ' + shopifyProducts.length + ' de ' + pl(shopifyProducts.length, 'variante', 'variantes') + '.</div>' +
+    '<div class="table-scroll"><table><thead><tr><th></th><th>Producto</th><th>Proveedor</th><th>Marca (Shopify)</th><th>Precio</th><th>Stock</th><th>Estado</th></tr></thead><tbody id="tablaProductosBody">' +
+    shopifyProducts.map(filaProducto).join('') +
+    '</tbody></table></div>' +
+    '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">"Proveedor" solo se marca como AFT cuando hubo una coincidencia fiable por EAN o SKU con el catálogo AFT — nunca se infiere del campo "Marca (Shopify)" (vendor), que puede contener valores que no son marcas reales.</p>'
+  : '<div class="empty-state">Todavía no se ha leído el catálogo de Shopify. Ejecuta una sincronización desde Integraciones.</div>';
 
 // --- Integraciones: estado real de los dos agentes operativos, y los
 //     pendientes de recuperar mostrados aparte y sin ningún botón activo. ---
@@ -389,7 +420,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
 'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;r.style.display=(okMarca&&okMargen)?"":"none";});}' +
-'function filtrarProductos(){var q=document.getElementById("buscarProducto").value.toLowerCase();var marca=document.getElementById("filtroMarcaProducto").value;var visibles=0;document.querySelectorAll("#tablaProductosBody tr").forEach(function(r){if(!r.dataset.nombre)return;var okTexto=r.dataset.nombre.indexOf(q)>-1;var okMarca=!marca||r.dataset.marca===marca;var match=okTexto&&okMarca;r.style.display=match?"":"none";if(match)visibles++;});var total=document.querySelectorAll("#tablaProductosBody tr[data-nombre]").length;var c=document.getElementById("contadorProductos");if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" producto.":" productos.");}' +
+'function filtrarProductos(){var q=document.getElementById("buscarProducto").value.toLowerCase();var proveedor=document.getElementById("filtroProveedorProducto").value;var vendor=document.getElementById("filtroVendorProducto").value;var estado=document.getElementById("filtroEstadoProducto").value;var disponibilidad=document.getElementById("filtroDisponibilidadProducto").value;var visibles=0;document.querySelectorAll("#tablaProductosBody tr").forEach(function(r){if(!r.dataset.nombre)return;var okTexto=r.dataset.nombre.indexOf(q)>-1;var okProveedor=!proveedor||r.dataset.proveedor===proveedor;var okVendor=!vendor||r.dataset.vendor===vendor;var okEstado=!estado||r.dataset.estado===estado;var okDisponibilidad=!disponibilidad||r.dataset.disponibilidad===disponibilidad;var match=okTexto&&okProveedor&&okVendor&&okEstado&&okDisponibilidad;r.style.display=match?"":"none";if(match)visibles++;});var total=document.querySelectorAll("#tablaProductosBody tr[data-nombre]").length;var c=document.getElementById("contadorProductos");if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" variante.":" variantes.");}' +
 'var aftPollTimer=null;' +
 'function pararPollAFT(){if(aftPollTimer){clearInterval(aftPollTimer);aftPollTimer=null;}}' +
 'function formatearFaseAFT(run){if(!run)return "Iniciando...";if(run.status==="running"){var fase=run.fase||"procesando";var detalle="";if(fase==="productos")detalle=" ("+(run.productos_insertados||0)+"/"+(run.total_productos||0)+")";else if(fase==="stock")detalle=" ("+(run.stock_insertado||0)+"/"+(run.total_stock||0)+")";else if(fase==="categorias")detalle=" ("+(run.categorias_insertadas||0)+"/"+(run.total_categorias||0)+")";return "Importando: "+fase+detalle+"...";}if(run.status==="success"){return "Categor\\u00edas: "+(run.categorias_insertadas||0)+" \\u00b7 Productos: "+(run.productos_insertados||0)+" \\u00b7 Stock: "+(run.stock_insertado||0)+" \\u00b7 Incidencias: "+(run.incidencias||0)+(run.stock_huerfano?" \\u00b7 "+run.stock_huerfano+" sin producto":"");}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +

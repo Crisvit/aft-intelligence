@@ -113,6 +113,28 @@ ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS es_oportunidad_comercial BOOL
 ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS coste_aft_sin_iva NUMERIC;
 ALTER TABLE shopify_match ADD COLUMN IF NOT EXISTS coste_aft_con_impuestos NUMERIC;
 
+-- Catálogo completo de Shopify (TODAS las variantes, no solo 100 productos
+-- ni la primera variante de cada uno), leído por el mismo paginador que ya
+-- usa el matching (shopify.getAllVariants, ver src/sync.js). Reemplaza la
+-- llamada en vivo que hacía la página "Productos" del dashboard. vendor_shopify
+-- es el campo "vendor" tal cual lo da Shopify — nunca se usa para decidir si
+-- un producto es de AFT (ver shopify_match.ref para eso, vía matching real
+-- por EAN/SKU); solo sirve como dato informativo y como filtro aparte.
+CREATE TABLE IF NOT EXISTS shopify_catalogo (
+  shopify_variant_id         TEXT PRIMARY KEY,
+  shopify_product_id         TEXT,
+  shopify_inventory_item_id  TEXT,
+  titulo                     TEXT,
+  vendor_shopify              TEXT,
+  estado                      TEXT,   -- 'ACTIVE' | 'DRAFT' | 'ARCHIVED'
+  barcode                     TEXT,
+  sku                         TEXT,
+  precio                      NUMERIC,
+  stock_ubicacion_principal   INTEGER,
+  imagen_url                  TEXT,
+  ultima_sync                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,
   ref            TEXT,

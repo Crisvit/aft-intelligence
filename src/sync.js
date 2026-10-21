@@ -10,14 +10,25 @@ const { pool } = require('./db');
 const aft = require('./aftClient');
 const shopify = require('./shopifyClient');
 
-const BRANDS = ['WOLFPACK', 'PAPILLON', 'SATURNIA', 'MAURER', 'SAMURAI', 'YAMATO'];
-const CATEGORIAS_INCLUIDAS = [
+// Listas configurables por entorno (CSV), sin tocar el código para
+// ajustarlas — si la variable no está definida, se usa el valor de
+// siempre. BRANDS_PRIORITARIAS decide el orden de las oportunidades
+// comerciales (esas marcas primero), no filtra nada por sí sola: el filtro
+// de inclusión sigue siendo BRANDS completo.
+function listaDesdeEnv(nombreEnv, porDefecto) {
+  const valor = process.env[nombreEnv];
+  if (!valor) return porDefecto;
+  return valor.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+}
+const BRANDS = listaDesdeEnv('AFT_BRANDS', ['WOLFPACK', 'PAPILLON', 'SATURNIA', 'MAURER', 'SAMURAI', 'YAMATO']);
+const BRANDS_PRIORITARIAS = listaDesdeEnv('AFT_BRANDS_PRIORITARIAS', ['WOLFPACK', 'SAMURAI', 'MAURER', 'PAPILLON', 'SATURNIA']);
+const CATEGORIAS_INCLUIDAS = listaDesdeEnv('AFT_CATEGORIAS_INCLUIDAS', [
   'HERRAMIENTA', 'ELECTROPORTATIL', 'AMOLADORA', 'TALADRO', 'SIERRA', 'MOTOSIERRA',
   'DESBROZADOR', 'HIDROLIMPIADORA', 'COMPRESOR', 'GENERADOR', 'SOLDAR',
   'DISCO DE CORTE', 'DISCO ABRASIVO', 'LIJA', 'BROCA', 'LLAVE', 'DESTORNILLADOR',
   'PODA', 'NIVEL', 'MANGUERA', 'RIEGO', 'BOMBA DE AGUA', 'MALLA DE SOMBREO',
   'BOTA', 'ROPA DE TRABAJO'
-];
+]);
 const FREE_SHIPPING_THRESHOLD = 30;
 const SHIPPING_HERRAMITIENDA = 4.41;
 const IVA_RECARGO_MAP = { 21: 5.2, 10: 1.4, 4: 0.5 };
@@ -413,6 +424,82 @@ function edgesDesdeMapa(mapa, clave) {
   return { data: { productVariants: { edges: nodos.map((node) => ({ node })) } } };
 }
 
+// Stock en la ubicación principal, leído directamente de un nodo de
+// getAllVariants() (no de combinarConShopify(), que no se toca) — misma
+// definición que usa el matching, para que "stock" signifique lo mismo en
+// todo el panel.
+function stockPrincipalDeNodo(node) {
+  const levels = (node.inventoryItem && node.inventoryItem.inventoryLevels && node.inventoryItem.inventoryLevels.edges) || [];
+  for (const l of levels) {
+    if (l.node.location && l.node.location.id === MAIN_LOCATION_ID) {
+      const qtyEntry = (l.node.quantities || []).find((q) => q.name === 'available');
+      return qtyEntry ? qtyEntry.quantity : null;
+    }
+  }
+  return null;
+}
+
+function filaCatalogoDeNodo(node) {
+  return {
+    shopify_variant_id: node.id,
+    shopify_product_id: node.product ? node.product.id : null,
+    shopify_inventory_item_id: node.inventoryItem ? node.inventoryItem.id : null,
+    titulo: node.product ? node.product.title : null,
+    vendor_shopify: node.product ? node.product.vendor : null,
+    estado: node.product ? node.product.status : null,
+    barcode: node.barcode,
+    sku: node.sku,
+    precio: node.price != null ? Number(node.price) : null,
+    stock_ubicacion_principal: stockPrincipalDeNodo(node),
+    imagen_url: node.product && node.product.featuredMedia && node.product.featuredMedia.preview ? node.product.featuredMedia.preview.image.url : null
+  };
+}
+
+const SHOPIFY_CATALOGO_COLS = [
+  'shopify_variant_id', 'shopify_product_id', 'shopify_inventory_item_id', 'titulo', 'vendor_shopify',
+  'estado', 'barcode', 'sku', 'precio', 'stock_ubicacion_principal', 'imagen_url'
+];
+function valoresCatalogo(fila) {
+  return SHOPIFY_CATALOGO_COLS.map((c) => (fila[c] !== undefined ? fila[c] : null));
+}
+function construirInsertCatalogo(numFilas) {
+  const nCols = SHOPIFY_CATALOGO_COLS.length;
+  const grupos = [];
+  for (let i = 0; i < numFilas; i++) {
+    const placeholders = SHOPIFY_CATALOGO_COLS.map((_, c) => `$${i * nCols + c + 1}`);
+    grupos.push(`(${placeholders.join(',')}, now())`);
+  }
+  return `INSERT INTO shopify_catalogo (${SHOPIFY_CATALOGO_COLS.join(',')}, ultima_sync) VALUES ${grupos.join(', ')}`;
+}
+
+// Guarda el catálogo completo de Shopify leído por getAllVariants() (todas
+// las variantes, no solo 100 productos ni la primera variante de cada uno)
+// para que la página "Productos" del dashboard lea de hmt-db en vez de
+// hacer una llamada en vivo a Shopify en cada carga. Reemplaza la tabla
+// entera solo cuando la lectura ya terminó del todo, igual que shopify_match.
+async function guardarCatalogoShopify(filas) {
+  await pool.query('DELETE FROM shopify_catalogo');
+  let guardadas = 0;
+  for (let i = 0; i < filas.length; i += SHOPIFY_MATCH_BATCH_SIZE) {
+    const lote = filas.slice(i, i + SHOPIFY_MATCH_BATCH_SIZE);
+    try {
+      await pool.query(construirInsertCatalogo(lote.length), lote.flatMap(valoresCatalogo));
+      guardadas += lote.length;
+    } catch (e) {
+      console.error(`[runInventorySync] Fallo el lote de catálogo Shopify (filas ${i}-${i + lote.length - 1}): ${e.message}. Reintentando fila a fila.`);
+      for (const fila of lote) {
+        try {
+          await pool.query(construirInsertCatalogo(1), valoresCatalogo(fila));
+          guardadas++;
+        } catch (e2) {
+          console.error(`[runInventorySync] Error SQL guardando variante Shopify (${fila.shopify_variant_id}): ${e2.message}`);
+        }
+      }
+    }
+  }
+  return guardadas;
+}
+
 const SHOPIFY_MATCH_BATCH_SIZE = 500;
 const SHOPIFY_MATCH_COLS = [
   'ref', 'ean', 'marca', 'shopify_variant_id', 'shopify_inventory_item_id', 'shopify_product_title',
@@ -506,11 +593,13 @@ async function runInventorySync(existingRunId) {
 
     const mapaPorBarcode = new Map();
     const mapaPorSku = new Map();
+    const catalogoFilas = [];
 
     const lectura = await shopify.getAllVariants(shopifyToken, {
       pageSize: SHOPIFY_PAGE_SIZE,
       onPage: async (edges, info) => {
         indexarVariantes(edges, mapaPorBarcode, mapaPorSku);
+        for (const edge of edges) catalogoFilas.push(filaCatalogoDeNodo(edge.node));
         await pool.query(
           `UPDATE sync_runs SET shopify_paginas_leidas = $2, shopify_variantes_leidas = $3 WHERE id = $1`,
           [runId, info.pagina, info.totalVariantes]
@@ -531,11 +620,15 @@ async function runInventorySync(existingRunId) {
 
     // Lectura de Shopify completa y confirmada (getAllVariants solo devuelve
     // el control cuando pageInfo.hasNextPage ha sido false) — a partir de
-    // aquí el matching ya puede considerarse definitivo.
+    // aquí el matching ya puede considerarse definitivo, y también se
+    // guarda el catálogo completo (todas las variantes) para la página
+    // "Productos" del dashboard.
     await pool.query(
       `UPDATE sync_runs SET fase = 'comparando', shopify_lectura_completa = true WHERE id = $1`,
       [runId]
     );
+
+    await guardarCatalogoShopify(catalogoFilas);
 
     await pool.query('DELETE FROM shopify_match');
     await pool.query(`UPDATE sync_runs SET comparacion_total = $2 WHERE id = $1`, [runId, candidatos.length]);
@@ -644,4 +737,4 @@ async function registrarIncidencia(ref, ean, tipo, detalle) {
   );
 }
 
-module.exports = { ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste };
+module.exports = { ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste, BRANDS_PRIORITARIAS };
