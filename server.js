@@ -6,7 +6,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
-const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS } = require('./src/sync');
+const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
+const { ejecutarAnalisisRentabilidad } = require('./src/rentabilidad');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -68,28 +69,48 @@ app.get('/status', basicAuth, async (req, res) => {
   res.json(result);
 });
 
+// Los cuatro agentes en segundo plano (importar AFT, sincronizar Shopify,
+// rentabilidad, pipeline completo) comparten un único candado: antes de
+// lanzar cualquiera de ellos se comprueba que ninguno de los otros esté
+// "running", para evitar ejecuciones simultáneas entre agentes (no solo
+// dentro del mismo agente). Un "running" más viejo que PROCESO_STALE_MS se
+// considera un proceso interrumpido (p.ej. por un reinicio del servicio) y
+// se marca como error en vez de bloquear para siempre.
+const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
+const TABLA_POR_TIPO = {
+  aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs'
+};
+
+async function haySolapamiento() {
+  const { rows } = await pool.query(`
+    SELECT 'aft_import' AS tipo, id, started_at FROM aft_import_runs WHERE status = 'running'
+    UNION ALL SELECT 'sync', id, started_at FROM sync_runs WHERE status = 'running'
+    UNION ALL SELECT 'rentabilidad', id, started_at FROM rentabilidad_runs WHERE status = 'running'
+    UNION ALL SELECT 'pipeline', id, started_at FROM pipeline_runs WHERE status = 'running'
+    ORDER BY started_at ASC LIMIT 1
+  `);
+  if (!rows.length) return null;
+  const activo = rows[0];
+  const antiguedadMs = Date.now() - new Date(activo.started_at).getTime();
+  if (antiguedadMs < PROCESO_STALE_MS) return activo;
+
+  await pool.query(
+    `UPDATE ${TABLA_POR_TIPO[activo.tipo]} SET status='error', finished_at=now(), error_message='Proceso interrumpido (reinicio del servicio o bloqueo de más de 2h)' WHERE id=$1`,
+    [activo.id]
+  );
+  return null;
+}
+
 // Importa SOLO el catálogo/categorías/stock de AFT a hmt-db — no llama a
 // Shopify en ningún punto (ingestAft() no referencia el cliente de Shopify).
 // Corre en segundo plano (responde 202 de inmediato) con el progreso real
 // guardado en aft_import_runs, para no depender de un timeout HTTP largo
 // y para poder sondear el avance desde el dashboard.
-const IMPORT_STALE_MS = 2 * 60 * 60 * 1000; // una importación "running" más antigua que esto se considera un proceso interrumpido
-
 app.post('/api/aft-import', basicAuth, async (req, res) => {
   try {
-    const { rows: enCursoRows } = await pool.query(
-      `SELECT id, started_at FROM aft_import_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`
-    );
-    if (enCursoRows.length) {
-      const enCurso = enCursoRows[0];
-      const antiguedadMs = Date.now() - new Date(enCurso.started_at).getTime();
-      if (antiguedadMs < IMPORT_STALE_MS) {
-        return res.status(409).json({ ok: false, error: 'Ya hay una importación de AFT en curso.', runId: enCurso.id });
-      }
-      await pool.query(
-        `UPDATE aft_import_runs SET status='error', finished_at=now(), error_message='Proceso interrumpido (reinicio del servicio o bloqueo de más de 2h)' WHERE id=$1`,
-        [enCurso.id]
-      );
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
     }
 
     const { rows: nuevoRows } = await pool.query(
@@ -131,23 +152,11 @@ app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
 // en Shopify — no existe ningún endpoint ni función que lo haga. Corre en
 // segundo plano (202 inmediato) porque ahora pagina todo el catálogo de
 // Shopify antes de comparar; el progreso real se sigue en sync_runs.
-const SYNC_STALE_MS = 2 * 60 * 60 * 1000; // una sincronización "running" más antigua que esto se considera un proceso interrumpido
-
 app.post('/api/sync-run', basicAuth, async (req, res) => {
   try {
-    const { rows: enCursoRows } = await pool.query(
-      `SELECT id, started_at FROM sync_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`
-    );
-    if (enCursoRows.length) {
-      const enCurso = enCursoRows[0];
-      const antiguedadMs = Date.now() - new Date(enCurso.started_at).getTime();
-      if (antiguedadMs < SYNC_STALE_MS) {
-        return res.status(409).json({ ok: false, error: 'Ya hay una sincronización Shopify en curso.', runId: enCurso.id });
-      }
-      await pool.query(
-        `UPDATE sync_runs SET status='error', finished_at=now(), fase='error', error_message='Proceso interrumpido (reinicio del servicio o bloqueo de más de 2h)' WHERE id=$1`,
-        [enCurso.id]
-      );
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
     }
 
     const { rows: nuevoRows } = await pool.query(
@@ -173,6 +182,118 @@ app.get('/api/sync-run/estado', basicAuth, async (req, res) => {
     res.json({ ok: true, run: rows[0] || null });
   } catch (e) {
     console.error('[sync-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Agente de rentabilidad: coste desglosado + transporte al cliente
+// configurado + margen real/proyectado + alertas. Solo lee shopify_match/
+// aft_catalogo ya guardados — no llama a Shopify ni a AFT.
+app.post('/api/rentabilidad-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO rentabilidad_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarAnalisisRentabilidad(runId).catch((e) => {
+      console.error('[rentabilidad-run] Error en el análisis en segundo plano:', e.message);
+    });
+  } catch (e) {
+    console.error('[rentabilidad-run] Error al iniciar el análisis:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/rentabilidad-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM rentabilidad_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[rentabilidad-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Automatización (prioridad 2): encadena importación AFT -> sincronización
+// Shopify (solo lectura) -> análisis de rentabilidad, en ese orden, en
+// segundo plano. Cada etapa sigue usando su propia tabla de progreso —
+// pipeline_runs solo guarda qué etapa va y enlaza los 3 run_id reales.
+// Crea la fila de pipeline_runs y encadena las 3 etapas en segundo plano.
+// La usan tanto la ruta POST /api/pipeline-run como el programador opcional
+// (ver PIPELINE_SCHEDULE_HOURS más abajo) para no duplicar la secuencia.
+async function lanzarPipelineCompleto() {
+  const { rows: nuevoRows } = await pool.query(
+    `INSERT INTO pipeline_runs (status, etapa) VALUES ('running', 'import_aft') RETURNING id`
+  );
+  const pipelineId = nuevoRows[0].id;
+
+  (async () => {
+    try {
+      const { rows: importRows } = await pool.query(
+        `INSERT INTO aft_import_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const importRunId = importRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET aft_import_run_id = $2 WHERE id = $1`, [pipelineId, importRunId]);
+      await ingestAft(importRunId);
+      await pool.query(`UPDATE aft_import_runs SET status='success', finished_at=now() WHERE id=$1`, [importRunId]);
+
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'sync_shopify' WHERE id = $1`, [pipelineId]);
+      const { rows: syncRows } = await pool.query(
+        `INSERT INTO sync_runs (started_at, status, fase) VALUES (now(), 'running', 'iniciando') RETURNING id`
+      );
+      const syncRunId = syncRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET sync_run_id = $2 WHERE id = $1`, [pipelineId, syncRunId]);
+      await runInventorySync(syncRunId);
+
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'rentabilidad' WHERE id = $1`, [pipelineId]);
+      const { rows: rentRows } = await pool.query(
+        `INSERT INTO rentabilidad_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const rentRunId = rentRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET rentabilidad_run_id = $2 WHERE id = $1`, [pipelineId, rentRunId]);
+      await ejecutarAnalisisRentabilidad(rentRunId);
+
+      await pool.query(`UPDATE pipeline_runs SET status = 'success', finished_at = now(), etapa = 'done' WHERE id = $1`, [pipelineId]);
+    } catch (e) {
+      console.error('[pipeline-run] Error en el pipeline en segundo plano:', e.message);
+      await pool.query(
+        `UPDATE pipeline_runs SET status = 'error', finished_at = now(), error_message = $2 WHERE id = $1`,
+        [pipelineId, e.message]
+      );
+    }
+  })();
+
+  return pipelineId;
+}
+
+app.post('/api/pipeline-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+    const pipelineId = await lanzarPipelineCompleto();
+    res.status(202).json({ ok: true, pipelineId, status: 'running' });
+  } catch (e) {
+    console.error('[pipeline-run] Error al iniciar el pipeline:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[pipeline-run/estado] Error leyendo el progreso:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -203,6 +324,22 @@ async function renderDashboard() {
 
   const { rows: ultimaImportRows } = await pool.query(`SELECT * FROM aft_import_runs ORDER BY id DESC LIMIT 1`);
   const ultimaImport = ultimaImportRows[0] || null;
+
+  const { rows: ultimaRentabilidadRows } = await pool.query(`SELECT * FROM rentabilidad_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaRentabilidad = ultimaRentabilidadRows[0] || null;
+
+  const { rows: ultimoPipelineRows } = await pool.query(`SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1`);
+  const ultimoPipeline = ultimoPipelineRows[0] || null;
+
+  // Productos que requieren atención: pérdida o margen bajo, de la última
+  // ejecución del agente de rentabilidad (prioridad 1).
+  const { rows: rentabilidadResultados } = await pool.query(
+    `SELECT * FROM rentabilidad_resultados WHERE estado_rentabilidad IN ('perdida','margen_bajo') ORDER BY margen_pct ASC NULLS LAST`
+  );
+
+  const { rows: rentabilidadAlertas } = await pool.query(
+    `SELECT ref, tipo, detalle, valor, detectado_en FROM rentabilidad_alertas ORDER BY detectado_en DESC LIMIT 100`
+  );
 
   const { rows: historialSyncRows } = await pool.query(
     `SELECT id, started_at, finished_at, status, error_message,
@@ -242,8 +379,9 @@ async function renderDashboard() {
             sm.margen_con_precio_aft_pct AS "margenPct"
      FROM shopify_match sm
      JOIN aft_catalogo c ON c.ref = sm.ref
-     WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true
-     LIMIT 500`
+     WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true AND sm.stock_aft >= $1
+     LIMIT 500`,
+    [STOCK_MINIMO_OPORTUNIDAD]
   );
   const esPrioritaria = (marca) => BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
   const oportunidadRows = oportunidadRowsRaw.slice().sort((a, b) => {
@@ -251,7 +389,7 @@ async function renderDashboard() {
     const prioB = esPrioritaria(b.marca) ? 1 : 0;
     if (prioA !== prioB) return prioB - prioA;
     return (Number(b.margenPct) || 0) - (Number(a.margenPct) || 0);
-  }).slice(0, 200);
+  }).slice(0, 200).map((r) => ({ ...r, esPrioritaria: esPrioritaria(r.marca) }));
 
   // Catálogo completo de Shopify (todas las variantes, ya leídas por
   // getAllVariants y guardadas por runInventorySync) cruzado con el
@@ -269,7 +407,9 @@ async function renderDashboard() {
   );
 
   const html = buildDashboardHtml({
-    productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows
+    productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
+    ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas,
+    stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD
   });
 
   cache = { html, builtAt: now };
@@ -286,6 +426,29 @@ app.get('/', basicAuth, async (req, res) => {
     res.status(502).send('No se pudo generar el dashboard. Revisa los logs del servicio o /status.');
   }
 });
+
+// Programación automática del pipeline completo — DESACTIVADA por defecto.
+// Solo se activa si se define PIPELINE_SCHEDULE_HOURS explícitamente en el
+// entorno (no viene en .env.example con un valor real a propósito): desplegar
+// este código no hace que se ejecute nada automáticamente por sí solo.
+const PIPELINE_SCHEDULE_HOURS = Number(process.env.PIPELINE_SCHEDULE_HOURS) || 0;
+if (PIPELINE_SCHEDULE_HOURS > 0) {
+  const intervaloMs = PIPELINE_SCHEDULE_HOURS * 60 * 60 * 1000;
+  console.log(`[pipeline] Programado automáticamente cada ${PIPELINE_SCHEDULE_HOURS}h (PIPELINE_SCHEDULE_HOURS).`);
+  setInterval(async () => {
+    try {
+      const enCurso = await haySolapamiento();
+      if (enCurso) {
+        console.log(`[pipeline] Ejecución programada omitida: ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).`);
+        return;
+      }
+      console.log('[pipeline] Lanzando ejecución programada del pipeline completo...');
+      await lanzarPipelineCompleto();
+    } catch (e) {
+      console.error('[pipeline] Error en la ejecución programada:', e.message);
+    }
+  }, intervaloMs);
+}
 
 app.listen(PORT, () => {
   console.log('AFT Intelligence escuchando en el puerto', PORT);

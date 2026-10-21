@@ -11,7 +11,12 @@ function buildDashboardHtml({
   matchRows,
   incidenciaRows,
   oportunidadRows,
-  historialSyncRows
+  historialSyncRows,
+  ultimaRentabilidad,
+  ultimoPipeline,
+  rentabilidadResultados,
+  rentabilidadAlertas,
+  stockMinimoOportunidad
 }) {
 
 function esc(s){ return String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -82,7 +87,9 @@ const kpis = [
   { icon: 'check', bg: '#ECFDF5', color: '#059669', n: ultimoSync ? num(ultimoSync.total_matched) : 0, l: 'Coincidencias AFT ↔ Shopify', page: 'coincidencias' },
   { icon: 'activity', bg: '#FFFBEB', color: '#D97706', n: ultimoSync ? num(ultimoSync.total_cambiarian) : 0, l: 'Cambios de stock/precio propuestos', page: 'coincidencias' },
   { icon: 'packageX', bg: '#FEF2F2', color: '#DC2626', n: ultimoSync ? num(ultimoSync.total_a_cero) : 0, l: 'Propuestas a stock cero', page: 'coincidencias' },
-  { icon: 'alertTri', bg: '#FFFBEB', color: '#D97706', n: ultimoSync ? num(ultimoSync.total_incidencias) : 0, l: 'Incidencias', page: 'actividad' }
+  { icon: 'alertTri', bg: '#FFFBEB', color: '#D97706', n: ultimoSync ? num(ultimoSync.total_incidencias) : 0, l: 'Incidencias', page: 'actividad' },
+  { icon: 'packageX', bg: '#FEF2F2', color: '#DC2626', n: ultimaRentabilidad ? num(ultimaRentabilidad.en_perdida) : 0, l: 'Productos en pérdida estimada', page: 'rentabilidad' },
+  { icon: 'alertTri', bg: '#FFFBEB', color: '#D97706', n: ultimaRentabilidad ? num(ultimaRentabilidad.margen_bajo) : 0, l: 'Productos con margen bajo', page: 'rentabilidad' }
 ];
 const kpiHtml = kpis.map(k =>
   '<div class="kpi kpi-clickable" data-page="' + k.page + '" onclick="ir(this)"><div class="kpi-icon" style="background:' + k.bg + ';color:' + k.color + '">' + icon(k.icon, 18) + '</div><div class="kpi-n">' + k.n + '</div><div class="kpi-l">' + k.l + '</div></div>'
@@ -109,6 +116,15 @@ if (ultimoSync && ultimoSync.status === 'error') {
 if (oportunidadRows.length > 0) {
   atencion.push({ icon: 'sparkles', color: '#7C3AED', bg: '#F5F3FF', title: pl(oportunidadRows.length, 'oportunidad comercial nueva', 'oportunidades comerciales nuevas'), desc: 'Referencias de tus marcas/categorías que AFT tiene y Shopify todavía no.', cta: 'Ver oportunidades', page: 'oportunidades' });
 }
+if (ultimaRentabilidad && ultimaRentabilidad.en_perdida > 0) {
+  atencion.push({ icon: 'packageX', color: '#DC2626', bg: '#FEF2F2', title: pl(ultimaRentabilidad.en_perdida, 'producto en pérdida estimada', 'productos en pérdida estimada'), desc: 'El coste total estimado supera al PVP real o proyectado.', cta: 'Ver rentabilidad', page: 'rentabilidad' });
+}
+if (ultimaRentabilidad && ultimaRentabilidad.margen_bajo > 0) {
+  atencion.push({ icon: 'alertTri', color: '#D97706', bg: '#FFFBEB', title: pl(ultimaRentabilidad.margen_bajo, 'producto con margen bajo', 'productos con margen bajo'), desc: 'Por debajo del umbral mínimo configurado.', cta: 'Ver rentabilidad', page: 'rentabilidad' });
+}
+if (!ultimaRentabilidad) {
+  atencion.push({ icon: 'activity', color: '#2563EB', bg: '#EFF6FF', title: 'El agente de rentabilidad todavía no se ha ejecutado', desc: 'Lánzalo desde Integraciones para ver márgenes y alertas reales.', cta: 'Ir a Integraciones', page: 'integraciones' });
+}
 function attnBtn(a){ return '<a class="btn-outline" data-page="' + a.page + '" onclick="ir(this)">' + esc(a.cta) + ' ' + icon('chevron', 13) + '</a>'; }
 const atencionHtml = atencion.length
   ? atencion.slice(0, 4).map(a => '<div class="attn-card"><div class="attn-icon" style="background:' + a.bg + ';color:' + a.color + '">' + icon(a.icon, 18) + '</div><div class="attn-title">' + esc(a.title) + '</div><div class="attn-desc">' + esc(a.desc) + '</div>' + attnBtn(a) + '</div>').join('')
@@ -124,6 +140,7 @@ historialSyncRows.forEach(r => eventos.push({
   color: r.status === 'error' ? '#DC2626' : '#087F78'
 }));
 incidenciaRows.forEach(r => eventos.push({ ts: r.detectado_en, texto: '[' + r.tipo + ']' + (r.ref ? ' ref ' + r.ref + ': ' : ' ') + (r.detalle || ''), color: '#D97706' }));
+(rentabilidadAlertas || []).forEach(r => eventos.push({ ts: r.detectado_en, texto: '[rentabilidad: ' + r.tipo + '] ' + (r.detalle || ''), color: r.tipo === 'perdida' ? '#DC2626' : '#D97706' }));
 eventos.sort((a, b) => new Date(b.ts) - new Date(a.ts));
 function tlRow(texto, ts, color){ return '<div class="tl-row"><div class="tl-dot" style="background:' + color + '"></div><div class="tl-body"><div class="tl-text">' + esc(texto) + '</div><div class="tl-time">' + esc(tiempoRelativo(ts)) + '</div></div></div>'; }
 const timelineHtml = eventos.length
@@ -174,13 +191,16 @@ const coincidenciasHtml = matchRows.length
     '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste registrado en Shopify se muestra tal cual está en la ficha — su tratamiento de IVA está pendiente de validar, por eso no se calcula una "diferencia de coste" automática entre AFT y Shopify.</p>'
   : '<div class="empty-state">Todavía no hay coincidencias guardadas. Ejecuta una sincronización desde Integraciones.</div>';
 
-// --- Página Oportunidades: datos reales, sin ningún score inventado ---
+// --- Página Oportunidades: datos reales, sin ningún score inventado.
+//     Ranking explicable: prioridad de marca (Wolfpack/Samurai/Maurer/
+//     Papillon/Saturnia, configurable) primero, margen real/proyectado
+//     después — nunca una puntuación opaca. ---
 const marcasOportunidad = Array.from(new Set(oportunidadRows.map(c => titleCase(c.marca || '')).filter(Boolean))).sort();
 function filaOportunidad(c){
   const margen = c.margenPct != null ? Number(c.margenPct) : null;
   return '<tr data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '">' +
     '<td data-label="Producto">' + esc(titleCase(c.descripcion || c.ref)) + '</td>' +
-    '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + '</td>' +
+    '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + (c.esPrioritaria ? ' <span class="badge badge-ok">Prioritaria</span>' : '') + '</td>' +
     '<td class="num" data-label="Stock AFT">' + num(c.stock) + '</td>' +
     '<td class="num" data-label="Coste">' + eur(c.coste) + '</td>' +
     '<td class="num" data-label="PVP recomendado">' + eur(c.precio) + '</td>' +
@@ -193,11 +213,50 @@ const oportunidadesHtml = oportunidadRows.length
       '<select id="filtroMarca" class="filter-select" onchange="filtrarOportunidades()"><option value="">Todas las marcas</option>' + marcasOportunidad.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select>' +
       '<select id="filtroMargen" class="filter-select" onchange="filtrarOportunidades()"><option value="0">Cualquier margen</option><option value="20">20%+</option><option value="30">30%+</option><option value="40">40%+</option></select>' +
     '</div>' +
-    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' — referencias de tus marcas/categorías comerciales que AFT tiene en stock y la última sincronización no encontró en Shopify.</div>' +
+    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Orden: marcas prioritarias (Wolfpack/Samurai/Maurer/Papillon/Saturnia) primero, después por margen — ambos configurables por variable de entorno.</div>' +
     '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th></th></tr></thead><tbody id="tablaOportunidadesBody">' +
     oportunidadRows.map(filaOportunidad).join('') +
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
+
+// --- Página Rentabilidad (prioridad 1): coste desglosado, transporte al
+//     cliente configurado por categoría/producto/peso (nunca una tarifa
+//     única), margen real (PVP de Shopify) o proyectado (PVP de AFT para
+//     oportunidades), y alertas explicadas. ---
+const ESTADO_RENT_BADGE = {
+  perdida: '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Pérdida</span>',
+  margen_bajo: '<span class="badge badge-warn">Margen bajo</span>',
+  sin_pvp: '<span class="badge badge-off">Sin PVP</span>'
+};
+function filaRentabilidad(r){
+  return '<tr data-ref="' + esc((r.ref||'').toLowerCase()) + '" data-nombre="' + esc((r.descripcion||'').toLowerCase()) + '" data-estado="' + esc(r.estado_rentabilidad) + '">' +
+    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + ' · ' + esc(titleCase(r.marca || '')) + '</div></td>' +
+    '<td class="num" data-label="Coste sin IVA">' + eur(r.coste_sin_iva) + '</td>' +
+    '<td class="num" data-label="+IVA/recargo">' + eur(r.coste_con_impuestos) + '</td>' +
+    '<td class="num" data-label="Transporte cliente">' + eur(r.transporte_cliente) + '<div style="font-size:10.5px;color:var(--sub);">' + esc(r.transporte_cliente_origen) + '</div></td>' +
+    '<td class="num" data-label="Portes proveedor (AFT)">' + (r.portes_proveedor_aft != null ? eur(r.portes_proveedor_aft) + ' *' : '—') + '</td>' +
+    '<td class="num" data-label="Coste total estimado">' + eur(r.coste_total_estimado) + '</td>' +
+    '<td class="num" data-label="PVP">' + eur(r.pvp_real) + (r.pvp_es_real ? '' : ' <span style="font-size:10px;color:var(--sub);">(proyectado)</span>') + '</td>' +
+    '<td class="num" data-label="Margen">' + (r.margen_pct != null ? '<span class="' + (r.margen_pct < 0 ? '' : 'ok') + '" style="' + (r.margen_pct < 0 ? 'color:#DC2626;font-weight:600;' : '') + '">' + pct(r.margen_pct) + '</span>' : '—') + '</td>' +
+    '<td data-label="Estado">' + (ESTADO_RENT_BADGE[r.estado_rentabilidad] || esc(r.estado_rentabilidad)) + '</td>' +
+    '</tr>';
+}
+const rentabilidadResultadosSeguro = rentabilidadResultados || [];
+const rentabilidadHtml = ultimaRentabilidad
+  ? (rentabilidadResultadosSeguro.length
+      ? '<div class="filterbar"><input type="text" id="buscarRentabilidad" class="filter-select" placeholder="Buscar por ref o nombre..." style="flex:1;max-width:280px;" oninput="filtrarRentabilidad()"/>' +
+          '<select id="filtroEstadoRentabilidad" class="filter-select" onchange="filtrarRentabilidad()"><option value="">Todos</option><option value="perdida">Pérdida</option><option value="margen_bajo">Margen bajo</option></select></div>' +
+        '<div class="table-note" id="contadorRentabilidad">Mostrando ' + rentabilidadResultadosSeguro.length + ' de ' + pl(rentabilidadResultadosSeguro.length, 'producto que requiere atención', 'productos que requieren atención') + ' (de ' + num(ultimaRentabilidad.procesados) + ' analizados).</div>' +
+        '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Coste sin IVA</th><th>+IVA/recargo</th><th>Transporte cliente</th><th>Portes proveedor (AFT)</th><th>Coste total estimado</th><th>PVP</th><th>Margen</th><th>Estado</th></tr></thead><tbody id="tablaRentabilidadBody">' +
+        rentabilidadResultadosSeguro.map(filaRentabilidad).join('') +
+        '</tbody></table></div>' +
+        '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">* Portes proveedor (AFT) es el campo portes de AFT, informativo — no se suma al coste total porque no está confirmado si ya viene incluido en el coste base. El coste registrado en Shopify tampoco se usa para calcular margen (su IVA no está confirmado) — el margen se calcula con el coste total estimado de esta tabla.</p>' +
+        '<h3 style="font-size:14px;margin:28px 0 12px;">Historial de alertas</h3>' +
+        (rentabilidadAlertas && rentabilidadAlertas.length
+          ? '<div class="panel-card">' + rentabilidadAlertas.slice(0, 50).map(a => '<div class="tl-row"><div class="tl-dot" style="background:' + (a.tipo === 'perdida' ? '#DC2626' : '#D97706') + '"></div><div class="tl-body"><div class="tl-text">' + esc(a.detalle) + '</div><div class="tl-time">' + esc(tiempoRelativo(a.detectado_en)) + '</div></div></div>').join('') + '</div>'
+          : '<div class="empty-state">Sin alertas registradas todavía.</div>')
+      : '<div class="empty-state">La última ejecución no encontró productos en pérdida ni con margen bajo.</div>')
+  : '<div class="empty-state">El agente de rentabilidad todavía no se ha ejecutado. Lánzalo desde Integraciones.</div>';
 
 // --- Página Productos: catálogo COMPLETO de Shopify (todas las variantes,
 //     no solo 100 productos ni la primera variante), con 4 filtros
@@ -257,12 +316,29 @@ function estadoSync(){
   if (ultimoSync.permisos_incompletos) return { dot: 'dot-warn', texto: 'Completa, con permisos incompletos' };
   return { dot: 'dot-ok', texto: 'Completa ' + tiempoRelativo(ultimoSync.finished_at) };
 }
+function estadoRentabilidad(){
+  if (!ultimaRentabilidad) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimaRentabilidad.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaRentabilidad.status === 'error') return { dot: 'dot-err', texto: 'Error en el último análisis' };
+  return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaRentabilidad.finished_at) };
+}
+function estadoPipeline(){
+  if (!ultimoPipeline) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimoPipeline.status === 'running') {
+    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', rentabilidad: 'calculando rentabilidad' }[ultimoPipeline.etapa] || 'en curso';
+    return { dot: 'dot-warn', texto: 'En curso — ' + etiquetaEtapa + '…' };
+  }
+  if (ultimoPipeline.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
+  return { dot: 'dot-ok', texto: 'Completo ' + tiempoRelativo(ultimoPipeline.finished_at) };
+}
 const eImport = estadoImport();
 const eSync = estadoSync();
+const eRent = estadoRentabilidad();
+const ePipeline = estadoPipeline();
 const AGENTES_PENDIENTES = [
   { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' },
-  { nombre: 'Señales de demanda', detalle: 'Volumen de búsqueda / interés por producto.' },
-  { nombre: 'Scoring de oportunidades', detalle: 'Puntuación combinada de rentabilidad y demanda.' }
+  { nombre: 'Señales de demanda / keywords', detalle: 'Volumen de búsqueda, interés por producto y palabras clave (SEO).' },
+  { nombre: 'Scoring de oportunidades con demanda externa', detalle: 'El ranking actual de Oportunidades ya usa datos reales (marca prioritaria + margen); esto añadiría demanda de mercado externa, que todavía no está conectada.' }
 ];
 const integracionesHtml =
   '<div class="integ-card">' +
@@ -274,6 +350,16 @@ const integracionesHtml =
     '<div class="integ-row"><span class="dot ' + eSync.dot + '" id="syncEstadoDot"></span><div><div class="integ-name">Comparación Shopify ↔ AFT</div><div class="integ-sub">Solo lectura — nunca escribe en Shopify</div></div><span class="integ-status" id="syncEstadoTexto">' + esc(eSync.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="sincronizarShopify(this)">Sincronizar Shopify ↔ AFT</button><span id="sincronizarResultado" class="integ-sub"></span></div>' +
     (ultimoSync ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimoSync.shopify_variantes_leidas) + ' variantes Shopify (' + num(ultimoSync.shopify_paginas_leidas) + ' páginas) · ' + num(ultimoSync.total_matched) + ' coincidencias · ' + num(ultimoSync.total_incidencias) + ' incidencias' + (ultimoSync.permisos_incompletos ? ' · faltan permisos: ' + esc((ultimoSync.permisos_detalle || '').slice(0, 140)) : '') + '</div>' : '') +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + eRent.dot + '" id="rentEstadoDot"></span><div><div class="integ-name">Rentabilidad</div><div class="integ-sub">Coste desglosado + transporte configurado + alertas — solo lee hmt-db</div></div><span class="integ-status" id="rentEstadoTexto">' + esc(eRent.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarRentabilidad(this)">Analizar rentabilidad</button><span id="rentResultado" class="integ-sub"></span></div>' +
+    (ultimaRentabilidad ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaRentabilidad.procesados) + ' analizados · ' + num(ultimaRentabilidad.en_perdida) + ' en pérdida · ' + num(ultimaRentabilidad.margen_bajo) + ' margen bajo · ' + num(ultimaRentabilidad.diferencia_coste) + ' con diferencia de coste</div>' : '') +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify (solo lectura) → Rentabilidad, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
+    '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HOURS — desplegar este código no programa nada por sí solo.</div>' +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-name" style="margin-bottom:10px;">Agentes pendientes de recuperar</div>' +
@@ -381,6 +467,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<a class="sb-link" data-page="coincidencias" onclick="ir(this)">' + icon('check', 17) + '<span>Coincidencias</span></a>' +
 '<a class="sb-link" data-page="oportunidades" onclick="ir(this)">' + icon('sparkles', 17) + '<span>Oportunidades</span></a>' +
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
+'<a class="sb-link" data-page="rentabilidad" onclick="ir(this)">' + icon('alertTri', 17) + '<span>Rentabilidad</span></a>' +
 '<a class="sb-link" data-page="actividad" onclick="ir(this)">' + icon('activity', 17) + '<span>Actividad</span></a>' +
 '<div class="sb-sep"></div>' +
 '<a class="sb-link" data-page="integraciones" onclick="ir(this)">' + icon('plug', 17) + '<span>Integraciones</span></a>' +
@@ -409,6 +496,8 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
+'<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + rentabilidadHtml + '</div>' +
+
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
 
 '<div class="page" id="page-integraciones"><div class="pagetitle">Integraciones</div>' + integracionesHtml + '</div>' +
@@ -431,6 +520,17 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function formatearFaseSync(run){if(!run)return "Iniciando...";if(run.status==="running"){var fase=run.fase||"procesando";if(fase==="leyendo_shopify")return "Leyendo Shopify: "+(run.shopify_variantes_leidas||0)+" variantes ("+(run.shopify_paginas_leidas||0)+" p\\u00e1ginas)...";if(fase==="comparando"||fase==="guardando_resultados")return "Comparando: "+(run.comparacion_procesadas||0)+"/"+(run.comparacion_total||0)+" referencias...";return "Procesando...";}if(run.status==="success"){return "Coincidencias: "+(run.total_matched||0)+" \\u00b7 Cambios: "+(run.total_cambiarian||0)+" \\u00b7 A cero: "+(run.total_a_cero||0)+" \\u00b7 Incidencias: "+(run.total_incidencias||0)+(run.permisos_incompletos?" \\u00b7 permisos incompletos":"");}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollSyncEstado(btn,out){pararPollSync();syncPollTimer=setInterval(function(){fetch("/api/sync-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseSync(run);if(!run||run.status!=="running"){pararPollSync();btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(run&&run.status==="success"){if(out)out.style.color=run.permisos_incompletos?"#D97706":"#059669";var dot=document.getElementById("syncEstadoDot");if(dot)dot.className="dot "+(run.permisos_incompletos?"dot-warn":"dot-ok");var txt=document.getElementById("syncEstadoTexto");if(txt)txt.textContent="Completa ahora mismo";}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
 'function sincronizarShopify(btn){pararPollSync();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Sincronizando...";var out=document.getElementById("sincronizarResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/sync-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollSyncEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay una sincronizaci\\u00f3n en curso, mostrando su progreso...";out.style.color="#D97706";}pollSyncEstado(btn,out);}else{btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'function filtrarRentabilidad(){var q=(document.getElementById("buscarRentabilidad").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoRentabilidad").value;var visibles=0;document.querySelectorAll("#tablaRentabilidadBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorRentabilidad");var total=document.querySelectorAll("#tablaRentabilidadBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" producto.":" productos.");}' +
+'var rentPollTimer=null;' +
+'function pararPollRent(){if(rentPollTimer){clearInterval(rentPollTimer);rentPollTimer=null;}}' +
+'function formatearFaseRent(run){if(!run)return "Iniciando...";if(run.status==="running"){return "Analizando: "+(run.fase||"procesando")+(run.total_analizados?" ("+(run.procesados||0)+"/"+run.total_analizados+")":"")+"...";}if(run.status==="success"){return "Analizados: "+(run.procesados||0)+" \\u00b7 P\\u00e9rdida: "+(run.en_perdida||0)+" \\u00b7 Margen bajo: "+(run.margen_bajo||0)+" \\u00b7 Diferencia coste: "+(run.diferencia_coste||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollRentEstado(btn,out){pararPollRent();rentPollTimer=setInterval(function(){fetch("/api/rentabilidad-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseRent(run);if(!run||run.status!=="running"){pararPollRent();btn.disabled=false;btn.textContent="Analizar rentabilidad";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("rentEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("rentEstadoTexto");if(txt)txt.textContent="Actualizado ahora mismo";}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
+'function ejecutarRentabilidad(btn){pararPollRent();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("rentResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/rentabilidad-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollRentEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollRentEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar rentabilidad";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar rentabilidad";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var pipelinePollTimer=null;' +
+'function pararPollPipeline(){if(pipelinePollTimer){clearInterval(pipelinePollTimer);pipelinePollTimer=null;}}' +
+'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollPipelineEstado(btn,out){pararPollPipeline();pipelinePollTimer=setInterval(function(){fetch("/api/pipeline-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFasePipeline(run);if(!run||run.status!=="running"){pararPollPipeline();btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("pipelineEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("pipelineEstadoTexto");if(txt)txt.textContent="Completo ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},3000);}' +
+'function ejecutarPipeline(btn){pararPollPipeline();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Ejecutando...";var out=document.getElementById("pipelineResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/pipeline-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollPipelineEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollPipelineEstado(btn,out);}else{btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 '</script></body></html>';
 
 return html;

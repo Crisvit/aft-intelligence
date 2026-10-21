@@ -29,6 +29,9 @@ const CATEGORIAS_INCLUIDAS = listaDesdeEnv('AFT_CATEGORIAS_INCLUIDAS', [
   'PODA', 'NIVEL', 'MANGUERA', 'RIEGO', 'BOMBA DE AGUA', 'MALLA DE SOMBREO',
   'BOTA', 'ROPA DE TRABAJO'
 ]);
+// Stock mínimo en AFT para que una referencia no encontrada en Shopify
+// cuente como oportunidad real (evita proponer productos sin existencias).
+const STOCK_MINIMO_OPORTUNIDAD = Number(process.env.AFT_STOCK_MINIMO_OPORTUNIDAD) || 1;
 const FREE_SHIPPING_THRESHOLD = 30;
 const SHIPPING_HERRAMITIENDA = 4.41;
 const IVA_RECARGO_MAP = { 21: 5.2, 10: 1.4, 4: 0.5 };
@@ -737,4 +740,8 @@ async function registrarIncidencia(ref, ean, tipo, detalle) {
   );
 }
 
-module.exports = { ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste, BRANDS_PRIORITARIAS };
+module.exports = {
+  ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste,
+  BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD,
+  calcularCosteYMargen, normalizar, round2
+};

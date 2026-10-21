@@ -156,6 +156,101 @@ CREATE TABLE IF NOT EXISTS sync_lock (
 -- servicio se reinicia a mitad de una importación, la fila queda en
 -- 'running' y se recupera como obsoleta la siguiente vez que se solicita
 -- una importación (ver server.js).
+-- Tarifas de transporte AL CLIENTE, configurables por categoría, producto
+-- (excepción) o peso — nunca una tarifa única universal. Orden de
+-- resolución (ver src/rentabilidad.js): ref > categoría > peso mínimo >
+-- valor por defecto (con umbral de envío gratis). Distinto de
+-- aft_catalogo.portes (transporte del PROVEEDOR a Herramitienda) — ese
+-- dato se muestra aparte en rentabilidad_resultados, sin sumarlo
+-- automáticamente al coste total, porque no está confirmado si ya viene
+-- incluido en aft_stock_precios.costo.
+CREATE TABLE IF NOT EXISTS config_transporte_cliente (
+  id                  SERIAL PRIMARY KEY,
+  tipo                TEXT NOT NULL,              -- 'ref' | 'categoria' | 'peso_minimo' | 'default'
+  clave               TEXT NOT NULL,              -- ref exacta, substring de categoría (mayúsculas), o etiqueta libre para peso_minimo/default
+  umbral_peso_gr      NUMERIC,                    -- solo relevante para tipo='peso_minimo'
+  tarifa              NUMERIC NOT NULL,
+  umbral_envio_gratis NUMERIC,                    -- si el PVP >= este valor, tarifa=0 (NULL = nunca gratis con esta regla)
+  nota                TEXT,
+  activo              BOOLEAN NOT NULL DEFAULT true,
+  creado_en           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tipo, clave)
+);
+INSERT INTO config_transporte_cliente (tipo, clave, tarifa, umbral_envio_gratis, nota) VALUES
+  ('default', '_DEFAULT_', 4.41, 30, 'Tarifa estándar Herramitienda, gratis desde 30€ (valor heredado del cálculo anterior a este agente)')
+  ON CONFLICT (tipo, clave) DO NOTHING;
+INSERT INTO config_transporte_cliente (tipo, clave, tarifa, umbral_envio_gratis, nota) VALUES
+  ('categoria', 'ESCALERA', 13, NULL, 'Producto pesado/voluminoso — tarifa fija confirmada, nunca envío gratis'),
+  ('categoria', 'ANDAMIO', 13, NULL, 'Producto pesado/voluminoso — tarifa fija confirmada, nunca envío gratis')
+  ON CONFLICT (tipo, clave) DO NOTHING;
+INSERT INTO config_transporte_cliente (tipo, clave, umbral_peso_gr, tarifa, umbral_envio_gratis, nota) VALUES
+  ('peso_minimo', 'PESO_20KG', 20000, 13, NULL, 'Productos pesados por peso (AFT peso_gr >= 20kg) sin categoría reconocida — misma tarifa fija que escaleras/andamios')
+  ON CONFLICT (tipo, clave) DO NOTHING;
+
+-- Progreso/historial del agente de rentabilidad.
+CREATE TABLE IF NOT EXISTS rentabilidad_runs (
+  id                SERIAL PRIMARY KEY,
+  started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at       TIMESTAMPTZ,
+  status            TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  fase              TEXT,
+  total_analizados  INTEGER DEFAULT 0,
+  procesados        INTEGER DEFAULT 0,
+  en_perdida        INTEGER DEFAULT 0,
+  margen_bajo       INTEGER DEFAULT 0,
+  diferencia_coste  INTEGER DEFAULT 0,
+  alertas_total     INTEGER DEFAULT 0,
+  error_message     TEXT
+);
+
+-- Resultado de rentabilidad por referencia en la última ejecución del
+-- agente (foto actual, se reemplaza entera cada run — como shopify_match).
+CREATE TABLE IF NOT EXISTS rentabilidad_resultados (
+  ref                        TEXT PRIMARY KEY,
+  marca                      TEXT,
+  descripcion                TEXT,
+  coste_sin_iva              NUMERIC,
+  iva_importe                NUMERIC,
+  recargo_importe            NUMERIC,
+  coste_con_impuestos        NUMERIC,
+  portes_proveedor_aft       NUMERIC,   -- aft_catalogo.portes, informativo — NO sumado al coste total
+  transporte_cliente         NUMERIC,
+  transporte_cliente_origen  TEXT,      -- regla aplicada: 'ref:<ref>' | 'categoria:<clave>' | 'peso_minimo:<clave>' | 'default'
+  coste_total_estimado       NUMERIC,   -- coste_con_impuestos + transporte_cliente
+  pvp_real                   NUMERIC,
+  pvp_es_real                BOOLEAN,   -- true = precio real de Shopify; false = precio AFT proyectado (sin coincidencia aún)
+  margen_pct                 NUMERIC,
+  margen_absoluto            NUMERIC,
+  shopify_cost                NUMERIC,
+  diferencia_coste_shopify   NUMERIC,   -- coste_total_estimado - shopify_cost (solo informativo)
+  estado_rentabilidad        TEXT,      -- 'ok' | 'margen_bajo' | 'perdida' | 'sin_pvp'
+  checked_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Historial (append-only) de alertas de rentabilidad, con explicación legible.
+CREATE TABLE IF NOT EXISTS rentabilidad_alertas (
+  id             SERIAL PRIMARY KEY,
+  ref            TEXT,
+  tipo           TEXT NOT NULL,  -- 'perdida' | 'margen_bajo' | 'diferencia_coste'
+  detalle        TEXT NOT NULL,
+  valor          NUMERIC,
+  detectado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Encadena importación AFT -> sincronización Shopify -> rentabilidad en una
+-- sola ejecución (prioridad 2: automatización), con su propio lock/historial.
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id                   SERIAL PRIMARY KEY,
+  started_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at          TIMESTAMPTZ,
+  status               TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  etapa                TEXT,    -- 'import_aft' | 'sync_shopify' | 'rentabilidad' | 'done'
+  aft_import_run_id    INTEGER,
+  sync_run_id          INTEGER,
+  rentabilidad_run_id  INTEGER,
+  error_message        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS aft_import_runs (
   id                      SERIAL PRIMARY KEY,
   started_at              TIMESTAMPTZ NOT NULL DEFAULT now(),

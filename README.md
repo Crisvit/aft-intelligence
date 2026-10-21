@@ -36,12 +36,20 @@ muestra como activo si no lo está (ver "Qué no está conectado todavía").
   EAN/SKU con el catálogo AFT; el resto se marca "Sin identificar" — nunca
   se adivina a partir del vendor de Shopify (que puede traer valores que no
   son marcas, como textos de envío) ni por similitud de nombre.
-- **Actividad**: historial de ejecuciones e incidencias registradas.
-- **Integraciones**: estado real de los dos procesos que sí funcionan
-  (importación AFT, comparación Shopify ↔ AFT) con botón para lanzarlos y
-  ver su progreso en vivo, y una lista aparte y claramente marcada como "No
+- **Rentabilidad** (prioridad 1): coste desglosado por referencia (sin IVA,
+  con IVA/recargo, transporte al cliente, portes del proveedor AFT
+  mostrados aparte), margen real (PVP de Shopify) o proyectado (PVP de AFT
+  para oportunidades), y alertas explicadas de pérdida, margen bajo y
+  diferencia de coste con Shopify, con su historial.
+- **Actividad**: historial de ejecuciones e incidencias registradas
+  (incluye las alertas de rentabilidad).
+- **Integraciones**: estado real de los tres agentes que sí funcionan
+  (importación AFT, comparación Shopify ↔ AFT, rentabilidad) con botón para
+  lanzarlos y ver su progreso en vivo, un cuarto botón para encadenarlos en
+  un solo pipeline, y una lista aparte y claramente marcada como "No
   conectado" de las funciones del panel original (fichas automáticas por
-  IA, señales de demanda, scoring) que no forman parte de este repositorio.
+  IA, señales de demanda, scoring con datos externos) que no forman parte
+  de este repositorio.
 
 ## Qué es nuevo y qué se reutilizó
 
@@ -85,6 +93,27 @@ Shopify Admin API (solo lectura, paginada) ─┘
   progreso real consultable por polling — pensado para catálogos de miles
   de referencias sin depender de una única petición HTTP larga.
 
+## Agente de rentabilidad
+
+`src/rentabilidad.js` reutiliza el cálculo de coste/IVA/recargo ya validado
+en `sync.js` (`calcularCosteYMargen`, sin tocarlo) y añade:
+
+- **Transporte al cliente configurable** (`config_transporte_cliente` en
+  hmt-db, editable sin redeploy): excepción por referencia > categoría >
+  peso mínimo > valor por defecto (con umbral de envío gratis). Nunca una
+  tarifa única — las categorías "ESCALERA"/"ANDAMIO" y los productos con
+  `peso_gr >= 20000` llevan 13€ fijo y nunca envío gratis, por defecto.
+- **Transporte del proveedor vs. transporte al cliente, sin duplicar**:
+  `aft_catalogo.portes` (lo que cobra AFT a Herramitienda) se calcula y se
+  muestra, pero **no se suma** al coste total — no está confirmado si ya
+  viene incluido en `aft_stock_precios.costo`.
+- **Alertas explicadas**: pérdida (margen negativo), margen bajo (por
+  debajo de `RENTABILIDAD_MARGEN_BAJO_PCT`, 15% por defecto) y diferencia
+  de coste con Shopify (por encima de `RENTABILIDAD_DIFERENCIA_COSTE_PCT`,
+  20% por defecto) — cada una con el detalle legible de por qué saltó,
+  guardado en `rentabilidad_alertas` (historial, no se borra entre
+  ejecuciones).
+
 ## Coste registrado en Shopify — pendiente de validar
 
 `shopify_match.shopify_cost` es el coste tal cual está en la ficha de
@@ -102,15 +131,18 @@ El panel distingue explícitamente, en la página Integraciones, entre lo que
 funciona y lo que no — nunca se muestra una función pendiente como si
 estuviera activa:
 
-- **Operativos (reales)**: importación de catálogo/stock de AFT, y
-  comparación de inventario Shopify ↔ AFT (control de stock y detección de
-  oportunidades).
+- **Operativos (reales)**: importación de catálogo/stock de AFT, comparación
+  de inventario Shopify ↔ AFT (control de stock y detección de
+  oportunidades), rentabilidad, y el pipeline que encadena los tres.
 - **Pendientes de recuperar (no conectados)**: fichas nuevas generadas
-  automáticamente por IA, señales de demanda y scoring de oportunidades.
-  Existían en el panel original pero dependen de otros agentes (n8n, fuera
-  de este repositorio) — no se han conectado aquí porque haría falta decidir
-  qué base de datos/tabla leer, en modo solo lectura, y con qué agente. El
-  panel los señala como "No conectado" en vez de simular sus resultados.
+  automáticamente por IA, señales de demanda/keywords, y un scoring de
+  oportunidades que incorpore demanda de mercado externa (el ranking actual
+  de Oportunidades ya es real — marca prioritaria + margen — pero sin esa
+  demanda externa). Existían en el panel original pero dependen de otros
+  agentes (n8n, fuera de este repositorio) — no se han conectado aquí porque
+  haría falta decidir qué base de datos/tabla leer, en modo solo lectura, y
+  con qué agente. El panel los señala como "No conectado" en vez de simular
+  sus resultados.
 
 ## Variables de entorno
 
@@ -118,6 +150,15 @@ Ver `.env.example`. Se configuran en Easypanel, nunca en el repositorio.
 Las credenciales reales de AFT y Shopify se pasan como el cuerpo exacto
 (JSON) del POST de token — así este código nunca necesita conocer los
 nombres de campo exactos que exige cada API.
+
+## Automatización (prioridad 2)
+
+El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar
+pipeline completo" en Integraciones) encadena importación AFT →
+sincronización Shopify (solo lectura) → rentabilidad, en ese orden, en
+segundo plano. La programación automática está **desactivada por defecto**:
+solo se activa si defines `PIPELINE_SCHEDULE_HOURS` explícitamente — sin
+esa variable, desplegar este código no ejecuta nada por sí solo.
 
 ## Puesta en marcha
 
@@ -142,7 +183,18 @@ servidor en cada despliegue.
 | `GET /api/aft-import/estado` | Progreso/resultado de la última importación AFT |
 | `POST /api/sync-run` | Lanza en segundo plano (202 inmediato) una comparación real AFT↔Shopify de solo lectura, sobre **todas** las referencias AFT |
 | `GET /api/sync-run/estado` | Progreso/resultado de la última comparación (páginas Shopify leídas, fase, permisos incompletos) |
+| `POST /api/rentabilidad-run` | Lanza el agente de rentabilidad en segundo plano (202 inmediato) — solo lee hmt-db, no llama a AFT ni a Shopify |
+| `GET /api/rentabilidad-run/estado` | Progreso/resultado del último análisis de rentabilidad |
+| `POST /api/pipeline-run` | Encadena importación AFT → sincronización Shopify → rentabilidad en segundo plano (202 inmediato) |
+| `GET /api/pipeline-run/estado` | Progreso/resultado del último pipeline completo (qué etapa va, run_id de cada una) |
 | `GET /healthz` | Health check sin autenticación |
+
+Los cuatro agentes (`aft-import`, `sync-run`, `rentabilidad-run`, `pipeline-run`)
+comparten un único candado: lanzar cualquiera de ellos falla con `409` si
+cualquier otro sigue `running` — nunca se ejecutan dos a la vez, dentro del
+mismo agente o entre agentes distintos. Un proceso `running` más antiguo de
+2 horas se trata como interrumpido (p. ej. por un reinicio del servicio) y
+se desbloquea solo, marcándose como error.
 
 ## Garantías de seguridad
 
