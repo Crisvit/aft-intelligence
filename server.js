@@ -7,7 +7,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
-const { ejecutarAnalisisRentabilidad } = require('./src/rentabilidad');
+const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -350,6 +350,20 @@ async function renderDashboard() {
     `SELECT ref, tipo, detalle, valor, detectado_en FROM rentabilidad_alertas ORDER BY detectado_en DESC LIMIT 100`
   );
 
+  // Recomendaciones de venta (prioridad 1, puntos 6-8 del ajuste comercial):
+  // solo referencias con margen suficiente (clasificacion_venta individual o
+  // complementaria — la clasificación NUNCA incluye datos_incompletos ni
+  // margen_insuficiente). Se priorizan los productos YA publicados en
+  // Shopify (pvp_es_real = true) antes que las nuevas oportunidades AFT
+  // (pvp_es_real = false, PVP todavía proyectado), y dentro de cada grupo
+  // por margen descendente.
+  const { rows: rentabilidadRecomendaciones } = await pool.query(
+    `SELECT * FROM rentabilidad_resultados
+     WHERE clasificacion_venta IN ('individual','complementaria')
+     ORDER BY pvp_es_real DESC, clasificacion_venta, margen_pct DESC NULLS LAST
+     LIMIT 500`
+  );
+
   const { rows: historialSyncRows } = await pool.query(
     `SELECT id, started_at, finished_at, status, error_message,
             total_matched, total_cambiarian, total_a_cero, total_sin_cambio, total_incidencias
@@ -417,7 +431,8 @@ async function renderDashboard() {
 
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
-    ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas,
+    ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
+    pvpComplementoMax: PVP_COMPLEMENTO_MAX,
     stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD
   });
 

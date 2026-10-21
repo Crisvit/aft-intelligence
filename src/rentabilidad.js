@@ -17,6 +17,11 @@ const DIFERENCIA_COSTE_ALERTA_PCT = Number(process.env.RENTABILIDAD_DIFERENCIA_C
 // Comisión de venta — SIN configurar por defecto (0%): no se inventa un
 // porcentaje. Se queda en 0€ hasta que se confirme una tarifa real.
 const COMISION_VENTA_PCT = Number(process.env.RENTABILIDAD_COMISION_VENTA_PCT) || 0;
+// PVP por debajo del cual un producto con margen suficiente se marca como
+// candidato a venta complementaria (complemento de compra), no venta
+// individual destacada. Configurable, con un valor de partida razonable —
+// nunca decide coste ni margen, solo clasifica.
+const PVP_COMPLEMENTO_MAX = Number(process.env.RENTABILIDAD_PVP_COMPLEMENTO_MAX) || 15;
 const BATCH_SIZE = 500;
 
 async function cargarReglasTransporte() {
@@ -90,6 +95,34 @@ function resolverTransporte(row, pvpReferencia, reglas) {
   };
 }
 
+// Confirmación comercial: AFT permite agrupar productos en un mismo pedido,
+// pero el coste del transporte agrupado depende del peso total y todavía no
+// hay una tabla de tarifas verificada para ese escenario. Por eso este
+// escenario NUNCA calcula un coste ni un margen: solo informa el peso total
+// (si se conoce) y un estado explícito. Nunca se suman los portes
+// individuales como sustituto del coste agrupado — un pedido agrupado paga
+// un único porte por el conjunto, no uno por artículo, así que sumarlos
+// sobrestimaría el coste y daría una cifra inventada.
+function resolverEscenarioAgrupado(row, transporte) {
+  const pesoGr = row.peso_gr != null ? Number(row.peso_gr) : null;
+  // Solo tiene sentido ofrecer el escenario agrupado para refs con envío
+  // directo de AFT confirmado (portes válido) — si ni siquiera hay un
+  // porte individual fiable, no hay base alguna para plantear agrupar.
+  const estado = transporte.esEnvioDirectoAFT ? 'pendiente_cotizacion' : 'no_aplica';
+  return { pesoGr: Number.isFinite(pesoGr) ? pesoGr : null, estado };
+}
+
+// Clasificación de venta — puramente informativa, no cambia coste ni
+// margen. Prioridad: datos incompletos > margen insuficiente (pérdida,
+// margen bajo o sin PVP) > complementaria (PVP bajo, candidato a venta
+// cruzada) > individual (venta destacada por sí sola).
+function clasificarVenta(estado, pvpReferencia) {
+  if (estado === 'datos_incompletos') return 'datos_incompletos';
+  if (estado === 'perdida' || estado === 'margen_bajo' || estado === 'sin_pvp') return 'margen_insuficiente';
+  if (pvpReferencia != null && pvpReferencia <= PVP_COMPLEMENTO_MAX) return 'complementaria';
+  return 'individual';
+}
+
 // Desglose completo: coste de producto, IVA 21%, recargo de equivalencia
 // 5,2%, transporte (AFT directo o respaldo propio, nunca ambos) y comisión
 // de venta, diferenciados. El coste final se marca siempre como estimado:
@@ -127,6 +160,10 @@ function calcularFilaRentabilidad(row, reglas) {
   else if (margenPct < MARGEN_BAJO_PCT) estado = 'margen_bajo';
   else estado = 'ok';
 
+  const escenarioAgrupado = resolverEscenarioAgrupado(row, transporte);
+  const clasificacionVenta = clasificarVenta(estado, pvpReferencia);
+  const esCandidatoComplemento = clasificacionVenta === 'complementaria';
+
   return {
     ref: row.ref, marca: row.marca, descripcion: row.descripcion,
     coste_sin_iva: datosBaseIncompletos ? null : base.costeBase,
@@ -144,7 +181,11 @@ function calcularFilaRentabilidad(row, reglas) {
     shopify_cost: shopifyCost, diferencia_coste_shopify: diferenciaCosteShopify,
     estado_rentabilidad: estado,
     datos_incompletos: datosIncompletos,
-    datos_incompletos_motivo: datosIncompletosMotivo
+    datos_incompletos_motivo: datosIncompletosMotivo,
+    peso_gr: escenarioAgrupado.pesoGr,
+    escenario_agrupado_estado: escenarioAgrupado.estado,
+    clasificacion_venta: clasificacionVenta,
+    es_candidato_complemento: esCandidatoComplemento
   };
 }
 
@@ -157,7 +198,8 @@ const RESULT_COLS = [
   'portes_proveedor_aft', 'transporte_cliente', 'transporte_cliente_origen', 'es_envio_directo_aft',
   'comision_venta_importe', 'coste_total_estimado',
   'pvp_real', 'pvp_es_real', 'margen_pct', 'margen_absoluto', 'shopify_cost', 'diferencia_coste_shopify',
-  'estado_rentabilidad', 'datos_incompletos', 'datos_incompletos_motivo'
+  'estado_rentabilidad', 'datos_incompletos', 'datos_incompletos_motivo',
+  'peso_gr', 'escenario_agrupado_estado', 'clasificacion_venta', 'es_candidato_complemento'
 ];
 function valoresResultado(f) { return RESULT_COLS.map((c) => (f[c] !== undefined ? f[c] : null)); }
 function construirInsertResultados(numFilas) {
@@ -300,4 +342,7 @@ async function ejecutarAnalisisRentabilidad(existingRunId) {
   }
 }
 
-module.exports = { ejecutarAnalisisRentabilidad, resolverTransporteCliente, resolverTransporte, parsePortes, calcularFilaRentabilidad };
+module.exports = {
+  ejecutarAnalisisRentabilidad, resolverTransporteCliente, resolverTransporte, parsePortes,
+  calcularFilaRentabilidad, resolverEscenarioAgrupado, clasificarVenta, PVP_COMPLEMENTO_MAX
+};

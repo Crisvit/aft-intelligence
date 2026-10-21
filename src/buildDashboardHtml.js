@@ -16,6 +16,8 @@ function buildDashboardHtml({
   ultimoPipeline,
   rentabilidadResultados,
   rentabilidadAlertas,
+  rentabilidadRecomendaciones,
+  pvpComplementoMax,
   stockMinimoOportunidad
 }) {
 
@@ -234,6 +236,18 @@ function explicacionTransporte(r){
   if (r.transporte_cliente_origen === 'default' || (r.transporte_cliente_origen || '').indexOf(':') === -1) return 'Tarifa propia de respaldo (AFT no da portes para esta ref)';
   return 'Tarifa propia de respaldo (' + esc(r.transporte_cliente_origen) + ') — AFT no da portes para esta ref';
 }
+// Escenario de pedido agrupado: AFT permite agrupar pedidos, pero el coste
+// depende del peso y todavía no hay tarifa verificada — por eso nunca se
+// muestra un coste ni un margen aquí, solo el peso (si se conoce) y el
+// estado. "Pendiente de cotización" es explícito, nunca se sustituye por
+// la suma de portes individuales (eso sobrestimaría el coste real).
+function celdaPedidoAgrupado(r){
+  const pesoTxt = r.peso_gr != null ? (Number(r.peso_gr) / 1000).toFixed(1).replace(/\.0$/, '') + ' kg' : 'peso no disponible';
+  if (r.escenario_agrupado_estado === 'pendiente_cotizacion') {
+    return pesoTxt + '<div style="margin-top:2px;"><span class="badge badge-off" style="background:#EFF6FF;color:#2563EB;">Pendiente de cotización</span></div>';
+  }
+  return '<span style="color:var(--sub);">No aplica</span>';
+}
 function filaRentabilidad(r){
   const incompleta = r.estado_rentabilidad === 'datos_incompletos';
   return '<tr data-ref="' + esc((r.ref||'').toLowerCase()) + '" data-nombre="' + esc((r.descripcion||'').toLowerCase()) + '" data-estado="' + esc(r.estado_rentabilidad) + '">' +
@@ -241,6 +255,7 @@ function filaRentabilidad(r){
     '<td class="num" data-label="Coste producto">' + (incompleta ? '—' : eur(r.coste_sin_iva)) + '</td>' +
     '<td class="num" data-label="+IVA/recargo">' + (incompleta ? '—' : eur(r.coste_con_impuestos)) + '</td>' +
     '<td class="num" data-label="Transporte">' + (incompleta ? '—' : eur(r.transporte_cliente)) + '<div style="font-size:10.5px;color:var(--sub);">' + explicacionTransporte(r) + '</div></td>' +
+    '<td data-label="Pedido agrupado" style="font-size:11.5px;">' + celdaPedidoAgrupado(r) + '</td>' +
     '<td class="num" data-label="Comisión venta">' + (incompleta || r.comision_venta_importe == null ? '—' : eur(r.comision_venta_importe)) + '</td>' +
     '<td class="num" data-label="Coste total (estimado)">' + (incompleta ? '—' : eur(r.coste_total_estimado)) + '</td>' +
     '<td class="num" data-label="PVP">' + eur(r.pvp_real) + (r.pvp_es_real ? '' : ' <span style="font-size:10px;color:var(--sub);">(proyectado)</span>') + '</td>' +
@@ -254,16 +269,52 @@ const rentabilidadHtml = ultimaRentabilidad
       ? '<div class="filterbar"><input type="text" id="buscarRentabilidad" class="filter-select" placeholder="Buscar por ref o nombre..." style="flex:1;max-width:280px;" oninput="filtrarRentabilidad()"/>' +
           '<select id="filtroEstadoRentabilidad" class="filter-select" onchange="filtrarRentabilidad()"><option value="">Todos (ordenados por riesgo)</option><option value="perdida">Pérdida</option><option value="datos_incompletos">Datos incompletos</option><option value="margen_bajo">Margen bajo</option></select></div>' +
         '<div class="table-note" id="contadorRentabilidad">Mostrando ' + rentabilidadResultadosSeguro.length + ' de ' + pl(rentabilidadResultadosSeguro.length, 'producto que requiere atención', 'productos que requieren atención') + ' (de ' + num(ultimaRentabilidad.procesados) + ' analizados), ordenados por riesgo: pérdida primero, después datos incompletos, después margen bajo.</div>' +
-        '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Coste producto</th><th>+IVA/recargo</th><th>Transporte</th><th>Comisión venta</th><th>Coste total (estimado)</th><th>PVP</th><th>Margen</th><th>Estado</th></tr></thead><tbody id="tablaRentabilidadBody">' +
+        '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Coste producto</th><th>+IVA/recargo</th><th>Transporte</th><th>Pedido agrupado</th><th>Comisión venta</th><th>Coste total (estimado)</th><th>PVP</th><th>Margen</th><th>Estado</th></tr></thead><tbody id="tablaRentabilidadBody">' +
         rentabilidadResultadosSeguro.map(filaRentabilidad).join('') +
         '</tbody></table></div>' +
-        '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste total se marca "(estimado)": el tratamiento fiscal de los portes de AFT (si el IVA ya está incluido en ese importe) todavía no está confirmado. El "Transporte" usa el portes real de AFT por referencia cuando está disponible (envío directo); solo se usa una tarifa propia de respaldo cuando AFT no da portes para esa ref — nunca se suman ambos. El coste registrado en Shopify tampoco se usa para calcular el margen (su IVA no está confirmado), solo para la alerta de diferencia de coste.</p>' +
+        '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste total se marca "(estimado)": el tratamiento fiscal de los portes de AFT (si el IVA ya está incluido en ese importe) todavía no está confirmado. El "Transporte" usa el portes real de AFT por referencia cuando está disponible (envío directo); solo se usa una tarifa propia de respaldo cuando AFT no da portes para esa ref — nunca se suman ambos. El coste registrado en Shopify tampoco se usa para calcular el margen (su IVA no está confirmado), solo para la alerta de diferencia de coste. "Pedido agrupado" muestra el peso total de la referencia cuando AFT da envío directo, pero el coste de agrupar varios productos en un mismo pedido queda "Pendiente de cotización": AFT no ha confirmado todavía una tarifa por peso para pedidos agrupados, y nunca se suman los portes individuales como sustituto (sobrestimaría el coste real) ni se calcula un margen para ese escenario.</p>' +
         '<h3 style="font-size:14px;margin:28px 0 12px;">Historial de alertas</h3>' +
         (rentabilidadAlertas && rentabilidadAlertas.length
           ? '<div class="panel-card">' + rentabilidadAlertas.slice(0, 50).map(a => '<div class="tl-row"><div class="tl-dot" style="background:' + (a.tipo === 'perdida' ? '#DC2626' : (a.tipo === 'datos_incompletos' ? '#6B7280' : '#D97706')) + '"></div><div class="tl-body"><div class="tl-text">' + esc(a.detalle) + '</div><div class="tl-time">' + esc(tiempoRelativo(a.detectado_en)) + '</div></div></div>').join('') + '</div>'
           : '<div class="empty-state">Sin alertas registradas todavía.</div>')
       : '<div class="empty-state">La última ejecución no encontró productos en pérdida, con margen bajo ni con datos incompletos.</div>')
   : '<div class="empty-state">El agente de rentabilidad todavía no se ha ejecutado. Lánzalo desde Integraciones.</div>';
+
+// Recomendaciones de venta (puntos 6-8 del ajuste comercial): separa venta
+// individual destacada de venta complementaria (producto de bajo precio,
+// candidato a cross-sell), excluyendo siempre los productos de margen
+// insuficiente o con datos incompletos (esos quedan en la tabla de arriba).
+// Dentro de cada grupo, los productos YA publicados en Shopify van primero
+// que las oportunidades AFT nuevas (PVP todavía proyectado).
+function filaRecomendacion(r){
+  const origen = r.pvp_es_real
+    ? '<span class="badge badge-ok">Publicado en Shopify</span>'
+    : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">Oportunidad AFT nueva</span>';
+  return '<tr>' +
+    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + ' · ' + esc(titleCase(r.marca || '')) + '</div></td>' +
+    '<td data-label="Origen">' + origen + '</td>' +
+    '<td class="num" data-label="PVP">' + eur(r.pvp_real) + (r.pvp_es_real ? '' : ' <span style="font-size:10px;color:var(--sub);">(proyectado)</span>') + '</td>' +
+    '<td class="num" data-label="Coste total (estimado)">' + eur(r.coste_total_estimado) + '</td>' +
+    '<td class="num" data-label="Margen">' + (r.margen_pct != null ? pct(r.margen_pct) : '—') + '</td>' +
+    '<td data-label="Pedido agrupado" style="font-size:11.5px;">' + celdaPedidoAgrupado(r) + '</td>' +
+    '</tr>';
+}
+const recomendacionesSeguro = rentabilidadRecomendaciones || [];
+const recIndividual = recomendacionesSeguro.filter(r => r.clasificacion_venta === 'individual');
+const recComplementaria = recomendacionesSeguro.filter(r => r.clasificacion_venta === 'complementaria');
+function tablaRecomendaciones(filas, vacioTexto){
+  if (!filas.length) return '<div class="empty-state">' + vacioTexto + '</div>';
+  return '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Origen</th><th>PVP</th><th>Coste total (estimado)</th><th>Margen</th><th>Pedido agrupado</th></tr></thead><tbody>' +
+    filas.map(filaRecomendacion).join('') + '</tbody></table></div>';
+}
+const recomendacionesHtml = ultimaRentabilidad
+  ? '<h3 style="font-size:14px;margin:32px 0 6px;">Recomendaciones de venta</h3>' +
+    '<p style="font-size:11.5px;color:var(--sub);margin:0 0 14px;">Solo productos con margen suficiente (fuera de la tabla de atención de arriba). Los productos ya publicados en Shopify se listan antes que las nuevas oportunidades de AFT (PVP todavía proyectado, sin coincidencia real).</p>' +
+    '<h4 style="font-size:12.5px;margin:0 0 8px;color:var(--sub);text-transform:uppercase;letter-spacing:.04em;">Venta individual (' + recIndividual.length + ')</h4>' +
+    tablaRecomendaciones(recIndividual, 'Ningún producto con margen suficiente para destacar como venta individual todavía.') +
+    '<h4 style="font-size:12.5px;margin:24px 0 8px;color:var(--sub);text-transform:uppercase;letter-spacing:.04em;">Venta complementaria — PVP ≤ ' + num(pvpComplementoMax) + '€ (' + recComplementaria.length + ')</h4>' +
+    tablaRecomendaciones(recComplementaria, 'Ningún producto de bajo precio detectado como candidato a complemento todavía.')
+  : '';
 
 // --- Página Productos: catálogo COMPLETO de Shopify (todas las variantes,
 //     no solo 100 productos ni la primera variante), con 4 filtros
@@ -503,7 +554,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
-'<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + rentabilidadHtml + '</div>' +
+'<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + rentabilidadHtml + recomendacionesHtml + '</div>' +
 
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
 

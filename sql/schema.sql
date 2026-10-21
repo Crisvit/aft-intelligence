@@ -242,6 +242,29 @@ ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS comision_venta_impo
 ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS datos_incompletos BOOLEAN DEFAULT false;
 ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS datos_incompletos_motivo TEXT;
 
+-- Confirmación comercial: AFT permite agrupar varios productos en un mismo
+-- pedido, pero el coste del transporte agrupado depende del peso total y
+-- NO hay todavía una tarifa verificada para ese escenario. Por eso NUNCA se
+-- inventa un coste ni se suman los portes individuales como si fueran el
+-- coste del pedido agrupado (eso sobrestimaría sistemáticamente, ya que un
+-- pedido agrupado paga un único porte por el peso conjunto, no uno por
+-- artículo) — solo se muestra el peso total y un estado explícito de
+-- "pendiente de cotización" (ver resolverEscenarioAgrupado en
+-- src/rentabilidad.js). escenario_agrupado_estado: 'pendiente_cotizacion'
+-- (hay portes individual de AFT, pero no tarifa agrupada confirmada) |
+-- 'no_aplica' (sin envío directo de AFT, no hay base para un escenario
+-- agrupado todavía).
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS peso_gr NUMERIC;
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS escenario_agrupado_estado TEXT;
+
+-- Clasificación de venta (solo informativa, no cambia coste/margen):
+-- 'individual' (margen suficiente en escenario individual) |
+-- 'complementaria' (PVP bajo, candidato a venta cruzada/complemento, ver
+-- RENTABILIDAD_PVP_COMPLEMENTO_MAX) | 'margen_insuficiente' (perdida,
+-- margen_bajo o sin_pvp) | 'datos_incompletos' (coste base no disponible).
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS clasificacion_venta TEXT;
+ALTER TABLE rentabilidad_resultados ADD COLUMN IF NOT EXISTS es_candidato_complemento BOOLEAN DEFAULT false;
+
 -- Historial (append-only) de alertas de rentabilidad, con explicación legible.
 CREATE TABLE IF NOT EXISTS rentabilidad_alertas (
   id             SERIAL PRIMARY KEY,
