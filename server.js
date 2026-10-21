@@ -228,7 +228,7 @@ app.get('/api/rentabilidad-run/estado', basicAuth, async (req, res) => {
 // pipeline_runs solo guarda qué etapa va y enlaza los 3 run_id reales.
 // Crea la fila de pipeline_runs y encadena las 3 etapas en segundo plano.
 // La usan tanto la ruta POST /api/pipeline-run como el programador opcional
-// (ver PIPELINE_SCHEDULE_HOURS más abajo) para no duplicar la secuencia.
+// (ver PIPELINE_SCHEDULE_HORA_MADRID más abajo) para no duplicar la secuencia.
 async function lanzarPipelineCompleto() {
   const { rows: nuevoRows } = await pool.query(
     `INSERT INTO pipeline_runs (status, etapa) VALUES ('running', 'import_aft') RETURNING id`

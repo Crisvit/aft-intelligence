@@ -27,7 +27,11 @@ function esc(s){ return String(s === undefined || s === null ? '' : s).replace(/
 function eur(n){ return (n === undefined || n === null) ? '—' : Number(n).toFixed(2) + '€'; }
 function pct(n){ return (n === undefined || n === null) ? '—' : Number(n).toFixed(1) + '%'; }
 function num(n){ return (n === undefined || n === null) ? '—' : n; }
-function titleCase(s){ return String(s||'').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
+// \b\w solo reconoce límites de palabra ASCII, así que con una vocal con
+// tilde (í, á, ó...) rompía el conteo de "inicio de palabra" y capitalizaba
+// también la letra siguiente (p. ej. "Batería" -> "BateríA"). \p{L} con
+// flag /u es Unicode-aware y evita ese error de presentación.
+function titleCase(s){ return String(s||'').toLowerCase().replace(/(^|[\s\-/.])(\p{L})/gu, (m, sep, letra) => sep + letra.toUpperCase()); }
 function pl(n, singular, plural){ return n + ' ' + (n === 1 ? singular : plural); }
 
 function tiempoRelativo(iso){
@@ -459,7 +463,7 @@ const integracionesHtml =
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify (solo lectura) → Rentabilidad, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
-    '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HOURS — desplegar este código no programa nada por sí solo.</div>' +
+    '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo.</div>' +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-name" style="margin-bottom:10px;">Agentes pendientes de recuperar</div>' +
