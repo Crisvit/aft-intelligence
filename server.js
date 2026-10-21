@@ -198,16 +198,33 @@ async function renderDashboard() {
   const now = Date.now();
   if (cache.html && (now - cache.builtAt) < CACHE_MS) return cache.html;
 
-  const { rows: syncRows } = await pool.query(
-    `SELECT id, started_at, finished_at, total_matched AS actualizados, total_no_encontrados AS "noEncontrados",
-            0 AS errores, status AS estado, started_at AS "createdAt"
+  const { rows: ultimoSyncRows } = await pool.query(`SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1`);
+  const ultimoSync = ultimoSyncRows[0] || null;
+
+  const { rows: ultimaImportRows } = await pool.query(`SELECT * FROM aft_import_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaImport = ultimaImportRows[0] || null;
+
+  const { rows: historialSyncRows } = await pool.query(
+    `SELECT id, started_at, finished_at, status, error_message,
+            total_matched, total_cambiarian, total_a_cero, total_sin_cambio, total_incidencias
      FROM sync_runs ORDER BY started_at DESC LIMIT 20`
   );
-  const { rows: detailRows } = await pool.query(
-    `SELECT ref, ean, shopify_product_title AS titulo, shopify_price AS "precioAnterior",
-            precio_venta_aft AS "precioNuevo", shopify_stock AS "stockAnterior",
-            stock_aft AS "stockNuevo", checked_at AS fecha
-     FROM shopify_match WHERE estado IN ('cambiaria','a_cero') ORDER BY checked_at DESC LIMIT 500`
+
+  // Coincidencias reales: todo lo que la última comparación emparejó con
+  // Shopify (cambios propuestos, a stock cero, sin cambios, e incidencias
+  // bloqueadas) — nunca las "no encontrado", esas son otra cosa (oportunidades).
+  const { rows: matchRows } = await pool.query(
+    `SELECT sm.ref, c.descripcion_corta AS descripcion, sm.stock_aft, sm.shopify_stock, sm.stock_diferencia,
+            sm.coste_aft_sin_iva, sm.coste_aft_con_impuestos, sm.shopify_cost, sm.shopify_price,
+            sm.precio_venta_aft, sm.estado
+     FROM shopify_match sm
+     LEFT JOIN aft_catalogo c ON c.ref = sm.ref
+     WHERE sm.estado IN ('cambiaria','a_cero','sin_cambio','incidencia')
+     ORDER BY sm.estado, sm.ref`
+  );
+
+  const { rows: incidenciaRows } = await pool.query(
+    `SELECT ref, tipo, detalle, detectado_en FROM incidencias ORDER BY detectado_en DESC LIMIT 100`
   );
 
   // Oportunidades reales: referencias AFT de marcas/categorías comerciales
@@ -216,20 +233,13 @@ async function renderDashboard() {
   const { rows: oportunidadRows } = await pool.query(
     `SELECT sm.ref, sm.ean, sm.marca, c.descripcion_corta AS descripcion, sm.stock_aft AS stock,
             sm.precio_venta_aft AS precio, sm.coste_para_margen AS coste,
-            sm.margen_con_precio_aft_pct AS "margenPct", sm.checked_at AS "createdAt"
+            sm.margen_con_precio_aft_pct AS "margenPct"
      FROM shopify_match sm
      JOIN aft_catalogo c ON c.ref = sm.ref
      WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true
      ORDER BY sm.margen_con_precio_aft_pct DESC NULLS LAST
      LIMIT 200`
   );
-  const candRows = oportunidadRows.map((r) => ({
-    id: r.ref, ref: r.ref, ean: r.ean, marca: r.marca, descripcion: r.descripcion,
-    stock: r.stock, precio: r.precio != null ? Number(r.precio) : null,
-    coste: r.coste != null ? Number(r.coste) : null,
-    margenPct: r.margenPct != null ? Number(r.margenPct) : 0,
-    estado: null, createdAt: r.createdAt
-  }));
 
   let shopifyProductsRaw = { data: { products: { edges: [] } } };
   try {
@@ -240,13 +250,7 @@ async function renderDashboard() {
   }
 
   const html = buildDashboardHtml({
-    syncRows,
-    shopifyProductsRaw,
-    candRows,
-    draftRows: [],
-    detailRows,
-    demandSignalsRows: [],
-    scoresV3Rows: []
+    shopifyProductsRaw, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows
   });
 
   cache = { html, builtAt: now };

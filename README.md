@@ -6,6 +6,31 @@ compara por EAN con alternativa por SKU, calcula coste real y rentabilidad,
 y muestra el resultado en un panel. No escribe en Shopify — ese código no
 existe en este repositorio.
 
+**Estado**: en producción, con dos ejecuciones reales completadas (importación
+AFT e inventario completo, comparación Shopify ↔ AFT). El panel muestra
+exclusivamente datos reales de esas ejecuciones — nada se simula ni se
+muestra como activo si no lo está (ver "Qué no está conectado todavía").
+
+## Qué verás en el panel
+
+- **Inicio**: indicadores reales (referencias AFT analizadas, variantes
+  Shopify leídas, coincidencias, cambios de stock/precio propuestos,
+  propuestas a stock cero, incidencias), alertas destacadas cuando hay algo
+  que revisar, y un resumen de actividad e integraciones.
+- **Coincidencias**: tabla con buscador y filtro por estado de todas las
+  referencias que AFT y Shopify tienen en común — stock en AFT, stock en
+  Shopify, diferencia, coste AFT (sin IVA y con impuestos), coste registrado
+  en Shopify y PVP de ambos.
+- **Oportunidades**: referencias de tus marcas/categorías comerciales que
+  AFT tiene en stock y la última sincronización no encontró en Shopify.
+- **Productos**: catálogo real de Shopify (solo lectura).
+- **Actividad**: historial de ejecuciones e incidencias registradas.
+- **Integraciones**: estado real de los dos procesos que sí funcionan
+  (importación AFT, comparación Shopify ↔ AFT) con botón para lanzarlos y
+  ver su progreso en vivo, y una lista aparte y claramente marcada como "No
+  conectado" de las funciones del panel original (fichas automáticas por
+  IA, señales de demanda, scoring) que no forman parte de este repositorio.
+
 ## Qué es nuevo y qué se reutilizó
 
 - **Reutilizado tal cual**: `src/buildDashboardHtml.js`, el motor de render
@@ -61,12 +86,19 @@ mano en el admin de Shopify.
 
 ## Qué no está conectado todavía
 
-- `draftRows` / `demandSignalsRows` / `scoresV3Rows` (fichas nuevas
-  generadas automáticamente, señales de demanda, scoring v3) son parte del
-  renderer original (`buildDashboardHtml.js`) pero vienen de otros agentes
-  n8n (no de este repositorio) — no se han conectado a ninguna fuente real
-  aquí porque haría falta decidir qué base de datos/tabla leer y confirmar
-  que sea solo lectura. El panel los muestra vacíos hasta entonces.
+El panel distingue explícitamente, en la página Integraciones, entre lo que
+funciona y lo que no — nunca se muestra una función pendiente como si
+estuviera activa:
+
+- **Operativos (reales)**: importación de catálogo/stock de AFT, y
+  comparación de inventario Shopify ↔ AFT (control de stock y detección de
+  oportunidades).
+- **Pendientes de recuperar (no conectados)**: fichas nuevas generadas
+  automáticamente por IA, señales de demanda y scoring de oportunidades.
+  Existían en el panel original pero dependen de otros agentes (n8n, fuera
+  de este repositorio) — no se han conectado aquí porque haría falta decidir
+  qué base de datos/tabla leer, en modo solo lectura, y con qué agente. El
+  panel los señala como "No conectado" en vez de simular sus resultados.
 
 ## Variables de entorno
 
@@ -103,5 +135,9 @@ servidor en cada despliegue.
 ## Garantías de seguridad
 
 - Ningún token ni contraseña se escribe en este repositorio.
-- `src/shopifyClient.js` no contiene ninguna mutación GraphQL.
+- `src/shopifyClient.js` no contiene ninguna mutación GraphQL — Shopify se
+  trata estrictamente en modo lectura en todo el código: no se actualizan
+  existencias, costes ni precios desde esta aplicación.
 - El panel exige Basic Auth (usuario + hash bcrypt de contraseña).
+- El panel es utilizable desde el móvil (diseño responsive, sin funciones
+  que dependan solo de ratón/pantalla grande).
