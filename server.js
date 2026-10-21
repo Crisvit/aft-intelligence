@@ -8,11 +8,17 @@ const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
+const { ejecutarReposicionStock } = require('./src/reposicion');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Mismo criterio que src/reposicion.js — usado aquí solo para mostrar el
+// estado real (dry run o escritura activa) en el dashboard, nunca para
+// decidir si escribir (esa decisión, incluida la comprobación del scope
+// write_inventory, vive exclusivamente en src/reposicion.js).
+const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').toLowerCase() === 'true';
 
 const DASHBOARD_USER = process.env.DASHBOARD_USER;
 const DASHBOARD_PASSWORD_HASH = process.env.DASHBOARD_PASSWORD_HASH;
@@ -78,7 +84,8 @@ app.get('/status', basicAuth, async (req, res) => {
 // se marca como error en vez de bloquear para siempre.
 const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
 const TABLA_POR_TIPO = {
-  aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs'
+  aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs',
+  reposicion: 'reposicion_runs'
 };
 
 async function haySolapamiento() {
@@ -87,6 +94,7 @@ async function haySolapamiento() {
     UNION ALL SELECT 'sync', id, started_at FROM sync_runs WHERE status = 'running'
     UNION ALL SELECT 'rentabilidad', id, started_at FROM rentabilidad_runs WHERE status = 'running'
     UNION ALL SELECT 'pipeline', id, started_at FROM pipeline_runs WHERE status = 'running'
+    UNION ALL SELECT 'reposicion', id, started_at FROM reposicion_runs WHERE status = 'running'
     ORDER BY started_at ASC LIMIT 1
   `);
   if (!rows.length) return null;
@@ -148,10 +156,13 @@ app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
   }
 });
 
-// Lanza una comparación real AFT <-> Shopify, solo lectura. Nunca escribe
-// en Shopify — no existe ningún endpoint ni función que lo haga. Corre en
-// segundo plano (202 inmediato) porque ahora pagina todo el catálogo de
-// Shopify antes de comparar; el progreso real se sigue en sync_runs.
+// Lanza una comparación real AFT <-> Shopify (solo lectura — runInventorySync
+// en sí no escribe nada), y a continuación el paso de reposición automática
+// de stock (Agente 2, paso 2): decide y, solo si está explícitamente
+// autorizado (SHOPIFY_WRITE_ENABLED=true + scope write_inventory concedido),
+// escribe en Shopify la cantidad confirmada por AFT. DRY RUN por defecto —
+// ver src/reposicion.js. Corre en segundo plano (202 inmediato); el
+// progreso real se sigue en sync_runs y reposicion_runs.
 app.post('/api/sync-run', basicAuth, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
@@ -166,11 +177,53 @@ app.post('/api/sync-run', basicAuth, async (req, res) => {
 
     res.status(202).json({ ok: true, runId, status: 'running' });
 
-    runInventorySync(runId).catch((e) => {
-      console.error('[sync-run] Error en la sincronización en segundo plano:', e.message);
-    });
+    runInventorySync(runId)
+      .then(async () => {
+        const { rows: repoRows } = await pool.query(
+          `INSERT INTO reposicion_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+        );
+        await ejecutarReposicionStock(repoRows[0].id);
+      })
+      .catch((e) => {
+        console.error('[sync-run] Error en la sincronización o la reposición en segundo plano:', e.message);
+      });
   } catch (e) {
     console.error('[sync-run] Error al iniciar la sincronización:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Progreso/resultado de la última reposición automática de stock.
+app.get('/api/reposicion-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM reposicion_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[reposicion-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Lanza el paso de reposición de forma independiente, sobre el último
+// shopify_match ya guardado (sin volver a leer Shopify ni AFT) — útil para
+// re-simular o reintentar sin tener que relanzar toda la sincronización.
+app.post('/api/reposicion-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO reposicion_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarReposicionStock(runId).catch((e) => {
+      console.error('[reposicion-run] Error en la reposición en segundo plano:', e.message);
+    });
+  } catch (e) {
+    console.error('[reposicion-run] Error al iniciar la reposición:', e.message);
     if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -253,6 +306,14 @@ async function lanzarPipelineCompleto() {
       await pool.query(`UPDATE pipeline_runs SET sync_run_id = $2 WHERE id = $1`, [pipelineId, syncRunId]);
       await runInventorySync(syncRunId);
 
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'reposicion' WHERE id = $1`, [pipelineId]);
+      const { rows: repoRows } = await pool.query(
+        `INSERT INTO reposicion_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const repoRunId = repoRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET reposicion_run_id = $2 WHERE id = $1`, [pipelineId, repoRunId]);
+      await ejecutarReposicionStock(repoRunId);
+
       await pool.query(`UPDATE pipeline_runs SET etapa = 'rentabilidad' WHERE id = $1`, [pipelineId]);
       const { rows: rentRows } = await pool.query(
         `INSERT INTO rentabilidad_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
@@ -330,6 +391,20 @@ async function renderDashboard() {
 
   const { rows: ultimoPipelineRows } = await pool.query(`SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1`);
   const ultimoPipeline = ultimoPipelineRows[0] || null;
+
+  const { rows: ultimaReposicionRows } = await pool.query(`SELECT * FROM reposicion_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaReposicion = ultimaReposicionRows[0] || null;
+
+  // Historial de eventos de reposición: solo cambios reales (no "sin_cambios"),
+  // más recientes primero — para que el dashboard muestre qué se actualizó
+  // (o se habría actualizado, en dry run) y por qué, nunca solo un contador.
+  const { rows: reposicionEventos } = await pool.query(
+    `SELECT ref, ean, marca, stock_shopify_antes, stock_aft, stock_shopify_despues,
+            tipo_evento, dry_run, escrito, verificado, detalle, detectado_en
+     FROM reposicion_eventos
+     WHERE tipo_evento != 'sin_cambios'
+     ORDER BY detectado_en DESC LIMIT 200`
+  );
 
   // Productos que requieren atención: pérdida, margen bajo o datos
   // incompletos, de la última ejecución del agente de rentabilidad
@@ -452,7 +527,9 @@ async function renderDashboard() {
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
     pvpComplementoMax: PVP_COMPLEMENTO_MAX,
     stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD,
-    totalesCatalogo, shopifyAdminStore
+    totalesCatalogo, shopifyAdminStore,
+    ultimaReposicion, reposicionEventos,
+    shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED
   });
 
   cache = { html, builtAt: now };

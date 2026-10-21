@@ -282,12 +282,13 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   started_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at          TIMESTAMPTZ,
   status               TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
-  etapa                TEXT,    -- 'import_aft' | 'sync_shopify' | 'rentabilidad' | 'done'
+  etapa                TEXT,    -- 'import_aft' | 'sync_shopify' | 'reposicion' | 'rentabilidad' | 'done'
   aft_import_run_id    INTEGER,
   sync_run_id          INTEGER,
   rentabilidad_run_id  INTEGER,
   error_message        TEXT
 );
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS reposicion_run_id INTEGER;
 
 CREATE TABLE IF NOT EXISTS aft_import_runs (
   id                      SERIAL PRIMARY KEY,
@@ -308,4 +309,52 @@ CREATE TABLE IF NOT EXISTS aft_import_runs (
   incidencias             INTEGER DEFAULT 0,
   errores_sql             INTEGER DEFAULT 0,
   error_message           TEXT
+);
+
+-- Reposición automática de stock (Agente 2, paso obligatorio tras la
+-- comparación Shopify<->AFT): decide y, si está autorizado, escribe en
+-- Shopify la cantidad "available" confirmada por AFT para cada coincidencia
+-- FIABLE con diferencia de stock. DRY RUN por defecto (dry_run=true salvo
+-- que SHOPIFY_WRITE_ENABLED=true Y la app tenga el scope write_inventory
+-- concedido, comprobado en cada ejecución — ver src/reposicion.js y
+-- src/shopifyWriteClient.js, el único archivo de todo el repositorio con
+-- capacidad real de escritura hacia Shopify).
+CREATE TABLE IF NOT EXISTS reposicion_runs (
+  id                          SERIAL PRIMARY KEY,
+  started_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at                 TIMESTAMPTZ,
+  status                      TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  fase                        TEXT,
+  dry_run                     BOOLEAN NOT NULL DEFAULT true,
+  total_candidatos            INTEGER DEFAULT 0,
+  actualizados                INTEGER DEFAULT 0,
+  recuperados_stock_cero      INTEGER DEFAULT 0,
+  reposiciones_detectadas     INTEGER DEFAULT 0,
+  correcciones_a_la_baja      INTEGER DEFAULT 0,
+  sin_cambios                 INTEGER DEFAULT 0,
+  errores                     INTEGER DEFAULT 0,
+  verificaciones_fallidas     INTEGER DEFAULT 0,
+  error_message               TEXT
+);
+
+-- Historial (append-only) de cada candidato evaluado por el agente de
+-- reposición, escrito o no — para que cada actualización (o la decisión de
+-- no actualizar) quede auditable desde el dashboard.
+CREATE TABLE IF NOT EXISTS reposicion_eventos (
+  id                          SERIAL PRIMARY KEY,
+  run_id                      INTEGER REFERENCES reposicion_runs(id),
+  ref                         TEXT,
+  ean                         TEXT,
+  marca                       TEXT,
+  shopify_variant_id          TEXT,
+  shopify_inventory_item_id   TEXT,
+  stock_shopify_antes         INTEGER,
+  stock_aft                   INTEGER,
+  stock_shopify_despues       INTEGER,  -- lo escrito (o lo que se habría escrito, en dry run)
+  tipo_evento                 TEXT NOT NULL,  -- 'producto_recuperado_stock_cero_negativo' | 'reposicion_detectada' | 'correccion_a_la_baja' | 'sin_cambios' | 'error'
+  dry_run                     BOOLEAN NOT NULL DEFAULT true,
+  escrito                     BOOLEAN NOT NULL DEFAULT false,  -- true solo si se llamó de verdad a la mutación
+  verificado                  BOOLEAN,  -- resultado de la lectura posterior; null si no aplica (dry run / sin cambios)
+  detalle                     TEXT,
+  detectado_en                TIMESTAMPTZ NOT NULL DEFAULT now()
 );

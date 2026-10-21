@@ -20,8 +20,21 @@ function buildDashboardHtml({
   pvpComplementoMax,
   stockMinimoOportunidad,
   totalesCatalogo,
-  shopifyAdminStore
+  shopifyAdminStore,
+  ultimaReposicion,
+  reposicionEventos,
+  shopifyWriteEnabled
 }) {
+
+// DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
+// incluido si falta el scope write_inventory, lo confirma cada ejecución
+// en reposicion_runs.dry_run — este flag es solo la intención configurada).
+// Declarado al principio porque lo usan tanto la página Coincidencias como
+// la página Integraciones.
+const repoEsDryRun = ultimaReposicion ? !!ultimaReposicion.dry_run : !shopifyWriteEnabled;
+const repoBadge = repoEsDryRun
+  ? '<span class="badge badge-off" style="background:#FFFBEB;color:#B45309;">DRY RUN — no escribe en Shopify</span>'
+  : '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">ESCRITURA REAL ACTIVA</span>';
 
 function esc(s){ return String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function eur(n){ return (n === undefined || n === null) ? '—' : Number(n).toFixed(2) + '€'; }
@@ -224,6 +237,37 @@ const coincidenciasHtml = matchRows.length
     '</tbody></table></div>' +
     '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste registrado en Shopify se muestra tal cual está en la ficha — su tratamiento de IVA está pendiente de validar, por eso no se calcula una "diferencia de coste" automática entre AFT y Shopify.</p>'
   : '<div class="empty-state">Todavía no hay coincidencias guardadas. Ejecuta una sincronización desde Integraciones.</div>';
+
+// --- Reposición automática de stock (Agente 2, paso 2) ---
+const TIPO_REPO_BADGE = {
+  producto_recuperado_stock_cero_negativo: '<span class="badge badge-ok">Recuperado de stock cero/negativo</span>',
+  reposicion_detectada: '<span class="badge badge-ok">Reposición detectada</span>',
+  correccion_a_la_baja: '<span class="badge badge-warn">Corrección a la baja</span>',
+  error: '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Error</span>'
+};
+function filaReposicion(r){
+  const escritoTxt = r.dry_run
+    ? '<span style="color:var(--sub);">Simulado (dry run)</span>'
+    : (r.escrito ? (r.verificado ? '<span class="ok">Escrito y verificado</span>' : '<span style="color:#D97706;">Escrito, verificación falló</span>') : '<span style="color:#DC2626;">No escrito</span>');
+  return '<tr>' +
+    '<td data-label="Producto"><div style="font-weight:600;">' + esc(r.ref) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(titleCase(r.marca || '')) + '</div></td>' +
+    '<td data-label="Tipo">' + (TIPO_REPO_BADGE[r.tipo_evento] || esc(r.tipo_evento)) + '</td>' +
+    '<td class="num" data-label="Stock Shopify antes">' + num(r.stock_shopify_antes) + '</td>' +
+    '<td class="num" data-label="Stock AFT">' + num(r.stock_aft) + '</td>' +
+    '<td class="num" data-label="Nuevo stock">' + num(r.stock_shopify_despues) + '</td>' +
+    '<td data-label="Resultado">' + escritoTxt + '</td>' +
+    '<td data-label="Cuándo">' + esc(tiempoRelativo(r.detectado_en)) + '</td>' +
+    '</tr>';
+}
+const reposicionEventosSeguro = reposicionEventos || [];
+const reposicionHtml =
+  '<h3 style="font-size:14px;margin:32px 0 6px;">Reposición automática de stock ' + repoBadge + '</h3>' +
+  '<p style="font-size:11.5px;color:var(--sub);margin:0 0 14px;">Historial de cada actualización (o simulación) decidida por el Agente 2 a partir del último stock confirmado por AFT — cantidad absoluta, nunca sumada. Solo sobre coincidencias fiables (EAN/SKU inequívoco, sin ambigüedad); nunca sobre stock de AFT negativo.</p>' +
+  (reposicionEventosSeguro.length
+    ? '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Tipo</th><th>Stock Shopify antes</th><th>Stock AFT</th><th>Nuevo stock</th><th>Resultado</th><th>Cuándo</th></tr></thead><tbody>' +
+      reposicionEventosSeguro.map(filaReposicion).join('') +
+      '</tbody></table></div>'
+    : '<div class="empty-state">Todavía no hay eventos de reposición. Lánzala desde Integraciones (se ejecuta automáticamente tras cada sincronización).</div>');
 
 // --- Página Oportunidades: datos reales, sin ningún score inventado.
 //     Ranking explicable: prioridad de marca (Wolfpack/Samurai/Maurer/
@@ -429,16 +473,23 @@ function estadoRentabilidad(){
 function estadoPipeline(){
   if (!ultimoPipeline) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
   if (ultimoPipeline.status === 'running') {
-    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', rentabilidad: 'calculando rentabilidad' }[ultimoPipeline.etapa] || 'en curso';
+    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad' }[ultimoPipeline.etapa] || 'en curso';
     return { dot: 'dot-warn', texto: 'En curso — ' + etiquetaEtapa + '…' };
   }
   if (ultimoPipeline.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
   return { dot: 'dot-ok', texto: 'Completo ' + tiempoRelativo(ultimoPipeline.finished_at) };
 }
+function estadoReposicion(){
+  if (!ultimaReposicion) return { dot: 'dot-warn', texto: 'Nunca ejecutada' };
+  if (ultimaReposicion.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaReposicion.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
+  return { dot: 'dot-ok', texto: 'Completa ' + tiempoRelativo(ultimaReposicion.finished_at) };
+}
 const eImport = estadoImport();
 const eSync = estadoSync();
 const eRent = estadoRentabilidad();
 const ePipeline = estadoPipeline();
+const eRepo = estadoReposicion();
 const AGENTES_PENDIENTES = [
   { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' },
   { nombre: 'Señales de demanda / keywords', detalle: 'Volumen de búsqueda, interés por producto y palabras clave (SEO).' },
@@ -451,9 +502,15 @@ const integracionesHtml =
     (ultimaImport ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaImport.productos_insertados) + ' productos · ' + num(ultimaImport.stock_insertado) + ' filas de stock · ' + num(ultimaImport.incidencias) + ' incidencias</div>' : '') +
   '</div>' +
   '<div class="integ-card">' +
-    '<div class="integ-row"><span class="dot ' + eSync.dot + '" id="syncEstadoDot"></span><div><div class="integ-name">Comparación Shopify ↔ AFT</div><div class="integ-sub">Solo lectura — nunca escribe en Shopify</div></div><span class="integ-status" id="syncEstadoTexto">' + esc(eSync.texto) + '</span></div>' +
+    '<div class="integ-row"><span class="dot ' + eSync.dot + '" id="syncEstadoDot"></span><div><div class="integ-name">Comparación Shopify ↔ AFT</div><div class="integ-sub">Lee Shopify y AFT; a continuación lanza el paso de reposición automática (ver tarjeta siguiente) — este paso en sí no escribe nada</div></div><span class="integ-status" id="syncEstadoTexto">' + esc(eSync.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="sincronizarShopify(this)">Sincronizar Shopify ↔ AFT</button><span id="sincronizarResultado" class="integ-sub"></span></div>' +
     (ultimoSync ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimoSync.shopify_variantes_leidas) + ' variantes Shopify (' + num(ultimoSync.shopify_paginas_leidas) + ' páginas) · ' + num(ultimoSync.total_matched) + ' coincidencias · ' + num(ultimoSync.total_incidencias) + ' incidencias' + (ultimoSync.permisos_incompletos ? ' · faltan permisos: ' + esc((ultimoSync.permisos_detalle || '').slice(0, 140)) : '') + '</div>' : '') +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + eRepo.dot + '" id="repoEstadoDot"></span><div><div class="integ-name">Reposición automática de stock ' + repoBadge + '</div><div class="integ-sub">Agente 2, paso 2 — escribe en Shopify la cantidad "disponible" confirmada por AFT, solo en coincidencias fiables</div></div><span class="integ-status" id="repoEstadoTexto">' + esc(eRepo.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarReposicion(this)">Ejecutar reposición</button><span id="repoResultado" class="integ-sub"></span></div>' +
+    (ultimaReposicion ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaReposicion.total_candidatos) + ' candidatos · ' + num(ultimaReposicion.recuperados_stock_cero) + ' recuperados de stock cero/negativo · ' + num(ultimaReposicion.reposiciones_detectadas) + ' reposiciones · ' + num(ultimaReposicion.correcciones_a_la_baja) + ' correcciones a la baja · ' + num(ultimaReposicion.errores) + ' errores' + (ultimaReposicion.verificaciones_fallidas > 0 ? ' · ' + num(ultimaReposicion.verificaciones_fallidas) + ' verificaciones fallidas' : '') + '</div>' : '') +
+    '<div class="integ-sub" style="margin-top:8px;">' + (shopifyWriteEnabled ? 'SHOPIFY_WRITE_ENABLED está activo — si además la app tiene el scope write_inventory concedido, escribe de verdad en Shopify (cantidad "available", nunca on_hand/comprometido/reservado) y verifica cada escritura con una lectura posterior.' : 'DRY RUN: sin SHOPIFY_WRITE_ENABLED=true, este paso solo calcula y registra lo que haría — nunca llama a Shopify para escribir.') + ' Nunca actualiza coincidencias ambiguas, sin referencia, con stock de AFT negativo o con ubicación dudosa.</div>' +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + eRent.dot + '" id="rentEstadoDot"></span><div><div class="integ-name">Rentabilidad</div><div class="integ-sub">Coste desglosado + transporte configurado + alertas — solo lee hmt-db</div></div><span class="integ-status" id="rentEstadoTexto">' + esc(eRent.texto) + '</span></div>' +
@@ -461,9 +518,9 @@ const integracionesHtml =
     (ultimaRentabilidad ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaRentabilidad.procesados) + ' analizados · ' + num(ultimaRentabilidad.en_perdida) + ' en pérdida · ' + num(ultimaRentabilidad.margen_bajo) + ' margen bajo · ' + num(ultimaRentabilidad.diferencia_coste) + ' con diferencia de coste</div>' : '') +
   '</div>' +
   '<div class="integ-card">' +
-    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify (solo lectura) → Rentabilidad, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
+    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
-    '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo.</div>' +
+    '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo. El paso de reposición dentro del pipeline sigue en DRY RUN salvo que SHOPIFY_WRITE_ENABLED esté activo.</div>' +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-name" style="margin-bottom:10px;">Agentes pendientes de recuperar</div>' +
@@ -594,7 +651,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '</div>' +
 '</div>' +
 
-'<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + '</div>' +
+'<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + '</div>' +
 
 '<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + '</div>' +
 
@@ -625,6 +682,11 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function formatearFaseSync(run){if(!run)return "Iniciando...";if(run.status==="running"){var fase=run.fase||"procesando";if(fase==="leyendo_shopify")return "Leyendo Shopify: "+(run.shopify_variantes_leidas||0)+" variantes ("+(run.shopify_paginas_leidas||0)+" p\\u00e1ginas)...";if(fase==="comparando"||fase==="guardando_resultados")return "Comparando: "+(run.comparacion_procesadas||0)+"/"+(run.comparacion_total||0)+" referencias...";return "Procesando...";}if(run.status==="success"){return "Coincidencias: "+(run.total_matched||0)+" \\u00b7 Cambios: "+(run.total_cambiarian||0)+" \\u00b7 A cero: "+(run.total_a_cero||0)+" \\u00b7 Incidencias: "+(run.total_incidencias||0)+(run.permisos_incompletos?" \\u00b7 permisos incompletos":"");}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollSyncEstado(btn,out){pararPollSync();syncPollTimer=setInterval(function(){fetch("/api/sync-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseSync(run);if(!run||run.status!=="running"){pararPollSync();btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(run&&run.status==="success"){if(out)out.style.color=run.permisos_incompletos?"#D97706":"#059669";var dot=document.getElementById("syncEstadoDot");if(dot)dot.className="dot "+(run.permisos_incompletos?"dot-warn":"dot-ok");var txt=document.getElementById("syncEstadoTexto");if(txt)txt.textContent="Completa ahora mismo";}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
 'function sincronizarShopify(btn){pararPollSync();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Sincronizando...";var out=document.getElementById("sincronizarResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/sync-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollSyncEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay una sincronizaci\\u00f3n en curso, mostrando su progreso...";out.style.color="#D97706";}pollSyncEstado(btn,out);}else{btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Sincronizar Shopify \\u2194 AFT";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var repoPollTimer=null;' +
+'function pararPollRepo(){if(repoPollTimer){clearInterval(repoPollTimer);repoPollTimer=null;}}' +
+'function formatearFaseRepo(run){if(!run)return "Iniciando...";if(run.status==="running")return "Procesando candidatos...";if(run.status==="success"){return (run.dry_run?"DRY RUN \\u2014 ":"")+"Actualizados: "+(run.actualizados||0)+" \\u00b7 Recuperados: "+(run.recuperados_stock_cero||0)+" \\u00b7 Repuestos: "+(run.reposiciones_detectadas||0)+" \\u00b7 Correcciones: "+(run.correcciones_a_la_baja||0)+" \\u00b7 Errores: "+(run.errores||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollRepoEstado(btn,out){pararPollRepo();repoPollTimer=setInterval(function(){fetch("/api/reposicion-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseRepo(run);if(!run||run.status!=="running"){pararPollRepo();btn.disabled=false;btn.textContent="Ejecutar reposici\\u00f3n";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("repoEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("repoEstadoTexto");if(txt)txt.textContent="Completa ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
+'function ejecutarReposicion(btn){pararPollRepo();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Ejecutando...";var out=document.getElementById("repoResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/reposicion-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollRepoEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollRepoEstado(btn,out);}else{btn.disabled=false;btn.textContent="Ejecutar reposici\\u00f3n";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Ejecutar reposici\\u00f3n";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 'function filtrarRentabilidad(){var q=(document.getElementById("buscarRentabilidad").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoRentabilidad").value;var visibles=0;document.querySelectorAll("#tablaRentabilidadBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorRentabilidad");var total=document.querySelectorAll("#tablaRentabilidadBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" producto.":" productos.");}' +
 'var rentPollTimer=null;' +
 'function pararPollRent(){if(rentPollTimer){clearInterval(rentPollTimer);rentPollTimer=null;}}' +
