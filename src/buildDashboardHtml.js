@@ -291,6 +291,21 @@ function filaRentabilidad(r){
     '<td data-label="Estado">' + (ESTADO_RENT_BADGE[r.estado_rentabilidad] || esc(r.estado_rentabilidad)) + '</td>' +
     '</tr>';
 }
+// Resumen ejecutivo: solo cifras reales de la última ejecución guardada —
+// nada calculado aparte, nada proyectado. Útil para una lectura de 5
+// segundos antes de entrar en el detalle de la tabla.
+const recomendacionesSeguroResumen = rentabilidadRecomendaciones || [];
+const resumenEjecutivoHtml = ultimaRentabilidad
+  ? '<div class="panel-card" style="padding:16px 18px;margin-bottom:18px;"><div style="font-weight:600;font-size:13px;margin-bottom:10px;">Resumen ejecutivo — última ejecución (' + esc(tiempoRelativo(ultimaRentabilidad.finished_at)) + ')</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:12.5px;">' +
+      '<div><span style="font-weight:700;font-size:16px;">' + num(ultimaRentabilidad.procesados) + '</span><br/><span style="color:var(--sub);">referencias analizadas</span></div>' +
+      '<div><span style="font-weight:700;font-size:16px;color:#DC2626;">' + num(ultimaRentabilidad.en_perdida) + '</span><br/><span style="color:var(--sub);">en pérdida estimada</span></div>' +
+      '<div><span style="font-weight:700;font-size:16px;color:#D97706;">' + num(ultimaRentabilidad.margen_bajo) + '</span><br/><span style="color:var(--sub);">con margen bajo</span></div>' +
+      '<div><span style="font-weight:700;font-size:16px;color:#6B7280;">' + num(ultimaRentabilidad.diferencia_coste) + '</span><br/><span style="color:var(--sub);">con diferencia de coste vs. Shopify</span></div>' +
+      '<div><span style="font-weight:700;font-size:16px;color:#059669;">' + recomendacionesSeguroResumen.filter(r => r.clasificacion_venta === 'individual').length + '</span><br/><span style="color:var(--sub);">rentables — venta individual</span></div>' +
+      '<div><span style="font-weight:700;font-size:16px;color:#059669;">' + recomendacionesSeguroResumen.filter(r => r.clasificacion_venta === 'complementaria').length + '</span><br/><span style="color:var(--sub);">rentables — venta complementaria</span></div>' +
+    '</div></div>'
+  : '';
 const rentabilidadResultadosSeguro = rentabilidadResultados || [];
 const rentabilidadHtml = ultimaRentabilidad
   ? (rentabilidadResultadosSeguro.length
@@ -581,7 +596,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
-'<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + rentabilidadHtml + recomendacionesHtml + '</div>' +
+'<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + resumenEjecutivoHtml + rentabilidadHtml + recomendacionesHtml + '</div>' +
 
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
 
