@@ -400,3 +400,40 @@ CREATE TABLE IF NOT EXISTS oportunidades_resultados (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS oportunidades_run_id INTEGER;
+
+-- Agente 5 — Demanda y SEO. Genera candidatos de keyword a partir del
+-- catálogo real (marca + categoría + descripción) para las oportunidades
+-- ya detectadas por el Agente 4, y consulta volumen/competencia REAL solo
+-- si hay una integración autorizada (DataForSEO) conectada — ver
+-- src/demanda.js y DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD en .env.example.
+-- Sin esa integración, status queda en 'no_conectado' (nunca 'success'
+-- fingiendo tener datos reales) y los candidatos se guardan sin volumen ni
+-- competencia (NULL, no un número inventado).
+CREATE TABLE IF NOT EXISTS demanda_runs (
+  id                     SERIAL PRIMARY KEY,
+  started_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at            TIMESTAMPTZ,
+  status                 TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error' | 'no_conectado'
+  fase                   TEXT,
+  fuente                 TEXT,  -- 'dataforseo' | 'catalogo_interno'
+  total_keywords         INTEGER DEFAULT 0,
+  verificadas            INTEGER DEFAULT 0,
+  sugeridas_sin_verificar INTEGER DEFAULT 0,
+  error_message          TEXT
+);
+
+-- Historial (append-only) de candidatos de keyword por ejecución —
+-- "verificado" distingue sin ambigüedad una métrica real de una sugerida.
+CREATE TABLE IF NOT EXISTS demanda_resultados (
+  id                SERIAL PRIMARY KEY,
+  run_id            INTEGER REFERENCES demanda_runs(id),
+  ref               TEXT,
+  keyword           TEXT NOT NULL,
+  origen            TEXT NOT NULL,  -- 'catalogo_interno' (derivada de marca+categoría+descripción, sin verificar) | 'dataforseo' (real)
+  volumen_busqueda  INTEGER,        -- NULL si no hay fuente real conectada
+  competencia       TEXT,           -- NULL si no hay fuente real conectada
+  verificado        BOOLEAN NOT NULL DEFAULT false,  -- true SOLO si viene de una fuente real conectada
+  checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS demanda_run_id INTEGER;

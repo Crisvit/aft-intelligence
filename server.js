@@ -10,6 +10,7 @@ const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
 const { ejecutarReposicionStock } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
+const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -86,7 +87,7 @@ app.get('/status', basicAuth, async (req, res) => {
 const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
 const TABLA_POR_TIPO = {
   aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs',
-  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs'
+  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs', demanda: 'demanda_runs'
 };
 
 async function haySolapamiento() {
@@ -97,6 +98,7 @@ async function haySolapamiento() {
     UNION ALL SELECT 'pipeline', id, started_at FROM pipeline_runs WHERE status = 'running'
     UNION ALL SELECT 'reposicion', id, started_at FROM reposicion_runs WHERE status = 'running'
     UNION ALL SELECT 'oportunidades', id, started_at FROM oportunidades_runs WHERE status = 'running'
+    UNION ALL SELECT 'demanda', id, started_at FROM demanda_runs WHERE status = 'running'
     ORDER BY started_at ASC LIMIT 1
   `);
   if (!rows.length) return null;
@@ -313,6 +315,43 @@ app.get('/api/oportunidades-run/estado', basicAuth, async (req, res) => {
   }
 });
 
+// Agente 5: demanda y SEO. Genera candidatos de keyword desde el catálogo
+// real para las oportunidades del Agente 4, y consulta volumen/competencia
+// REAL solo si DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD están configurados —
+// si no, termina con status 'no_conectado' (nunca inventa un volumen).
+app.post('/api/demanda-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO demanda_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarAnalisisDemanda(runId).catch((e) => {
+      console.error('[demanda-run] Error en el análisis en segundo plano:', e.message);
+    });
+  } catch (e) {
+    console.error('[demanda-run] Error al iniciar el análisis:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/demanda-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM demanda_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[demanda-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // Automatización (prioridad 2): encadena importación AFT -> sincronización
 // Shopify (solo lectura) -> análisis de rentabilidad, en ese orden, en
 // segundo plano. Cada etapa sigue usando su propia tabla de progreso —
@@ -367,6 +406,14 @@ async function lanzarPipelineCompleto() {
       const opRunId = opRows[0].id;
       await pool.query(`UPDATE pipeline_runs SET oportunidades_run_id = $2 WHERE id = $1`, [pipelineId, opRunId]);
       await ejecutarAnalisisOportunidades(opRunId);
+
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'demanda' WHERE id = $1`, [pipelineId]);
+      const { rows: demRows } = await pool.query(
+        `INSERT INTO demanda_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const demRunId = demRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET demanda_run_id = $2 WHERE id = $1`, [pipelineId, demRunId]);
+      await ejecutarAnalisisDemanda(demRunId);
 
       await pool.query(`UPDATE pipeline_runs SET status = 'success', finished_at = now(), etapa = 'done' WHERE id = $1`, [pipelineId]);
     } catch (e) {
@@ -532,6 +579,16 @@ async function renderDashboard() {
      LIMIT 500`
   );
 
+  // Agente 5 (demanda/SEO) — keywords candidatas del catálogo, y
+  // volumen/competencia reales solo si hay una fuente conectada
+  // (demanda_resultados.verificado distingue sin ambigüedad una métrica
+  // real de una sugerida sin verificar).
+  const { rows: ultimaDemandaRows } = await pool.query(`SELECT * FROM demanda_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaDemanda = ultimaDemandaRows[0] || null;
+  const { rows: demandaResultados } = await pool.query(
+    `SELECT ref, keyword, origen, volumen_busqueda, competencia, verificado FROM demanda_resultados ORDER BY ref, verificado DESC, keyword LIMIT 500`
+  );
+
   // Catálogo completo de Shopify (todas las variantes, ya leídas por
   // getAllVariants y guardadas por runInventorySync) cruzado con el
   // matching real para identificar el proveedor — nunca por vendor ni por
@@ -569,7 +626,9 @@ async function renderDashboard() {
     totalesCatalogo, shopifyAdminStore,
     ultimaReposicion, reposicionEventos,
     shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED,
-    ultimaOportunidades
+    ultimaOportunidades,
+    ultimaDemanda, demandaResultados,
+    demandaConectada: hayIntegracionDemandaConfigurada()
   });
 
   cache = { html, builtAt: now };

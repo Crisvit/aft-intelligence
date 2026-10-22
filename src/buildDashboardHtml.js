@@ -24,7 +24,10 @@ function buildDashboardHtml({
   ultimaReposicion,
   reposicionEventos,
   shopifyWriteEnabled,
-  ultimaOportunidades
+  ultimaOportunidades,
+  ultimaDemanda,
+  demandaResultados,
+  demandaConectada
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -300,6 +303,30 @@ const oportunidadesHtml = oportunidadRows.length
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
 
+// --- Demanda y SEO (Agente 5): keywords candidatas por referencia ---
+function filaDemanda(d){
+  const origenBadge = d.verificado
+    ? '<span class="badge badge-ok">Volumen real (DataForSEO)</span>'
+    : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">Sugerida, sin verificar</span>';
+  return '<tr>' +
+    '<td data-label="Referencia">' + esc(d.ref) + '</td>' +
+    '<td data-label="Keyword">' + esc(d.keyword) + '</td>' +
+    '<td data-label="Origen">' + origenBadge + '</td>' +
+    '<td class="num" data-label="Volumen">' + (d.volumen_busqueda != null ? num(d.volumen_busqueda) : '—') + '</td>' +
+    '<td data-label="Competencia">' + (d.competencia != null ? esc(d.competencia) : '—') + '</td>' +
+    '</tr>';
+}
+const demandaResultadosSeguro = demandaResultados || [];
+const demandaHtml = ultimaDemanda
+  ? '<h3 style="font-size:14px;margin:32px 0 6px;">Demanda y SEO — keywords candidatas ' + (demandaConectada ? '<span class="badge badge-ok">DataForSEO conectado</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</h3>' +
+    '<p style="font-size:11.5px;color:var(--sub);margin:0 0 14px;">Generadas a partir del catálogo real (marca + categoría + descripción) para las oportunidades del Agente 4. "Volumen real" solo aparece cuando hay una fuente externa conectada y respondió correctamente — el resto queda marcado "sugerida, sin verificar", nunca con un número inventado.</p>' +
+    (demandaResultadosSeguro.length
+      ? '<div class="table-scroll"><table><thead><tr><th>Referencia</th><th>Keyword</th><th>Origen</th><th>Volumen</th><th>Competencia</th></tr></thead><tbody>' +
+        demandaResultadosSeguro.map(filaDemanda).join('') +
+        '</tbody></table></div>'
+      : '<div class="empty-state">El último análisis no generó keywords (sin oportunidades del Agente 4 todavía).</div>')
+  : '';
+
 // --- Página Rentabilidad (prioridad 1): coste desglosado, transporte al
 //     cliente configurado por categoría/producto/peso (nunca una tarifa
 //     única), margen real (PVP de Shopify) o proyectado (PVP de AFT para
@@ -476,7 +503,7 @@ function estadoRentabilidad(){
 function estadoPipeline(){
   if (!ultimoPipeline) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
   if (ultimoPipeline.status === 'running') {
-    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad', oportunidades: 'analizando oportunidades' }[ultimoPipeline.etapa] || 'en curso';
+    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad', oportunidades: 'analizando oportunidades', demanda: 'analizando demanda/SEO' }[ultimoPipeline.etapa] || 'en curso';
     return { dot: 'dot-warn', texto: 'En curso — ' + etiquetaEtapa + '…' };
   }
   if (ultimoPipeline.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
@@ -500,9 +527,16 @@ function estadoOportunidades(){
   return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaOportunidades.finished_at) };
 }
 const eOp = estadoOportunidades();
+function estadoDemanda(){
+  if (!ultimaDemanda) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimaDemanda.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaDemanda.status === 'error') return { dot: 'dot-err', texto: 'Error en el último análisis' };
+  if (ultimaDemanda.status === 'no_conectado') return { dot: 'dot-warn', texto: 'Completado — sin fuente real conectada' };
+  return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaDemanda.finished_at) };
+}
+const eDem = estadoDemanda();
 const AGENTES_PENDIENTES = [
-  { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' },
-  { nombre: 'Señales de demanda / keywords', detalle: 'Volumen de búsqueda, interés por producto y palabras clave (SEO).' }
+  { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' }
 ];
 const integracionesHtml =
   '<div class="integ-card">' +
@@ -532,7 +566,13 @@ const integracionesHtml =
     (ultimaOportunidades ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaOportunidades.total_candidatos) + ' candidatos · ' + num(ultimaOportunidades.prioritarias) + ' de marca prioritaria · ' + num(ultimaOportunidades.complementarias) + ' candidatas a venta complementaria</div>' : '') +
   '</div>' +
   '<div class="integ-card">' +
-    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad → Oportunidades, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
+    '<div class="integ-row"><span class="dot ' + eDem.dot + '" id="demEstadoDot"></span><div><div class="integ-name">Demanda y SEO ' + (demandaConectada ? '<span class="badge badge-ok">DataForSEO conectado</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</div><div class="integ-sub">Agente 5 — keywords candidatas del catálogo para las oportunidades del Agente 4; volumen/competencia reales solo con DataForSEO configurado</div></div><span class="integ-status" id="demEstadoTexto">' + esc(eDem.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarDemanda(this)">Analizar demanda</button><span id="demResultado" class="integ-sub"></span></div>' +
+    (ultimaDemanda ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaDemanda.total_keywords) + ' keywords candidatas · ' + num(ultimaDemanda.verificadas) + ' con volumen real (DataForSEO) · ' + num(ultimaDemanda.sugeridas_sin_verificar) + ' sugeridas sin verificar</div>' : '') +
+    '<div class="integ-sub" style="margin-top:8px;">' + (demandaConectada ? 'DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD configurados — consulta volumen de búsqueda y competencia reales.' : 'Sin DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD, solo genera candidatos de keyword a partir del catálogo (marca+categoría+descripción), siempre marcados "sin verificar" — nunca un volumen de búsqueda inventado.') + '</div>' +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad → Oportunidades → Demanda/SEO, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
     '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo. El paso de reposición dentro del pipeline sigue en DRY RUN salvo que SHOPIFY_WRITE_ENABLED esté activo.</div>' +
   '</div>' +
@@ -667,7 +707,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 
 '<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + '</div>' +
 
-'<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + '</div>' +
+'<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
@@ -712,6 +752,11 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function formatearFaseOp(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="success"){return "Candidatos: "+(run.total_candidatos||0)+" \\u00b7 Prioritarias: "+(run.prioritarias||0)+" \\u00b7 Complementarias: "+(run.complementarias||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollOpEstado(btn,out){pararPollOp();opPollTimer=setInterval(function(){fetch("/api/oportunidades-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseOp(run);if(!run||run.status!=="running"){pararPollOp();btn.disabled=false;btn.textContent="Analizar oportunidades";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("opEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("opEstadoTexto");if(txt)txt.textContent="Actualizado ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
 'function ejecutarOportunidades(btn){pararPollOp();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("opResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/oportunidades-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollOpEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollOpEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar oportunidades";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar oportunidades";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var demPollTimer=null;' +
+'function pararPollDem(){if(demPollTimer){clearInterval(demPollTimer);demPollTimer=null;}}' +
+'function formatearFaseDem(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin fuente conectada: "+(run.total_keywords||0)+" keywords sugeridas (sin verificar).";}if(run.status==="success"){return "Keywords: "+(run.total_keywords||0)+" \\u00b7 Con volumen real: "+(run.verificadas||0)+" \\u00b7 Sin verificar: "+(run.sugeridas_sin_verificar||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollDemEstado(btn,out){pararPollDem();demPollTimer=setInterval(function(){fetch("/api/demanda-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseDem(run);if(!run||run.status==="running"){return;}pararPollDem();btn.disabled=false;btn.textContent="Analizar demanda";if(run.status==="success"){if(out)out.style.color="#059669";}else if(run.status==="no_conectado"){if(out)out.style.color="#D97706";}else{if(out)out.style.color="#DC2626";}var dot=document.getElementById("demEstadoDot");if(dot)dot.className="dot "+(run.status==="error"?"dot-err":"dot-ok");location.reload();}).catch(function(){});},2000);}' +
+'function ejecutarDemanda(btn){pararPollDem();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("demResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/demanda-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollDemEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollDemEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 'var pipelinePollTimer=null;' +
 'function pararPollPipeline(){if(pipelinePollTimer){clearInterval(pipelinePollTimer);pipelinePollTimer=null;}}' +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
