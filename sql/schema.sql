@@ -437,3 +437,50 @@ CREATE TABLE IF NOT EXISTS demanda_resultados (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS demanda_run_id INTEGER;
+
+-- Agente 6 — Fichas de producto con IA. Usa datos reales de AFT y los
+-- resultados ya puntuados del Agente 4 para generar un borrador (título,
+-- descripción, atributos, metadatos SEO) SOLO si hay un proveedor de IA
+-- conectado (ver ANTHROPIC_API_KEY en .env.example y src/fichasIa.js). Sin
+-- esa conexión, status queda en 'no_conectado' y NO se genera ningún
+-- borrador — nunca se presenta una plantilla como si fuera un resultado de
+-- IA. Aprobar/Rechazar/Editar son SIEMPRE cambios de estado en PostgreSQL;
+-- ningún camino de este agente llama a Shopify ni publica nada.
+CREATE TABLE IF NOT EXISTS fichas_runs (
+  id               SERIAL PRIMARY KEY,
+  started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at      TIMESTAMPTZ,
+  status           TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error' | 'no_conectado'
+  fase             TEXT,
+  modelo           TEXT,
+  total_candidatos INTEGER DEFAULT 0,
+  generados        INTEGER DEFAULT 0,
+  con_avisos_calidad INTEGER DEFAULT 0,
+  error_message    TEXT
+);
+
+-- Borradores — revisión humana obligatoria antes de cualquier publicación
+-- (que, en cualquier caso, no ocurre desde este repositorio: "aprobar"
+-- aquí solo marca el borrador como listo, nunca escribe en Shopify).
+CREATE TABLE IF NOT EXISTS fichas_borradores (
+  id                  SERIAL PRIMARY KEY,
+  run_id              INTEGER REFERENCES fichas_runs(id),
+  ref                 TEXT NOT NULL,
+  marca               TEXT,
+  titulo              TEXT,
+  descripcion         TEXT,
+  atributos           JSONB,
+  meta_titulo         TEXT,
+  meta_descripcion    TEXT,
+  keywords_seo        JSONB,
+  modelo              TEXT,
+  calidad_validada    BOOLEAN NOT NULL DEFAULT false,
+  motivo_calidad      TEXT,
+  estado              TEXT NOT NULL DEFAULT 'pendiente',  -- 'pendiente' | 'aprobado' | 'rechazado'
+  editado             BOOLEAN NOT NULL DEFAULT false,
+  revisado_por        TEXT,
+  revisado_en         TIMESTAMPTZ,
+  creado_en           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS fichas_run_id INTEGER;

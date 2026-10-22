@@ -27,7 +27,10 @@ function buildDashboardHtml({
   ultimaOportunidades,
   ultimaDemanda,
   demandaResultados,
-  demandaConectada
+  demandaConectada,
+  ultimaFichas,
+  fichasBorradores,
+  iaConectada
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -80,7 +83,8 @@ const ICON = {
   packageX: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8M8.5 5.5l7 4"/>',
   chevron: '<path d="M9 18l6-6-6-6"/>',
   circle: '<circle cx="12" cy="12" r="10"/>',
-  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>'
 };
 function icon(name, size, color){ return '<svg width="'+(size||16)+'" height="'+(size||16)+'" viewBox="0 0 24 24" fill="none" stroke="'+(color||'currentColor')+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>'; }
 
@@ -327,6 +331,52 @@ const demandaHtml = ultimaDemanda
       : '<div class="empty-state">El último análisis no generó keywords (sin oportunidades del Agente 4 todavía).</div>')
   : '';
 
+// --- Página Fichas IA (Agente 6): revisión humana obligatoria. Aprobar,
+//     Rechazar y Editar son SIEMPRE cambios de estado en PostgreSQL — no
+//     existe, en ningún punto de esta página ni de su JS, una llamada que
+//     publique en Shopify. ---
+const ESTADO_FICHA_BADGE = {
+  pendiente: '<span class="badge badge-warn">Pendiente de revisión</span>',
+  aprobado: '<span class="badge badge-ok">Aprobado</span>',
+  rechazado: '<span class="badge badge-off">Rechazado</span>'
+};
+function filaFicha(f){
+  const acciones = f.estado === 'pendiente'
+    ? '<button class="btn-sm btn-solid" onclick="revisarFicha(' + f.id + ',\'aprobar\',this)">Aprobar</button> ' +
+      '<button class="btn-sm btn-outline" onclick="revisarFicha(' + f.id + ',\'rechazar\',this)">Rechazar</button> ' +
+      '<button class="btn-sm btn-outline" onclick="editarFicha(' + f.id + ')">Editar</button>'
+    : '<span style="color:var(--sub);font-size:11px;">' + (f.revisado_por ? 'por ' + esc(f.revisado_por) + ' · ' : '') + esc(tiempoRelativo(f.revisado_en)) + '</span>';
+  const avisoCalidad = !f.calidad_validada
+    ? '<div style="font-size:10.5px;color:#D97706;margin-top:4px;">⚠ Aviso de calidad: ' + esc(f.motivo_calidad || 'sin detalle') + '</div>'
+    : '';
+  let keywords = [];
+  try { keywords = f.keywords_seo ? (typeof f.keywords_seo === 'string' ? JSON.parse(f.keywords_seo) : f.keywords_seo) : []; } catch (e) { keywords = []; }
+  return '<div class="panel-card" id="ficha-' + f.id + '" style="margin-bottom:12px;padding:16px 18px;">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">' +
+      '<div><div style="font-weight:700;font-size:14px;" id="ficha-titulo-' + f.id + '">' + esc(f.titulo || '(sin título)') + '</div>' +
+      '<div style="font-size:11px;color:var(--sub);margin-top:2px;">' + esc(f.ref) + ' · ' + esc(titleCase(f.marca || '')) + (f.editado ? ' · <span style="color:#2563EB;">editado manualmente</span>' : '') + '</div></div>' +
+      '<div>' + (ESTADO_FICHA_BADGE[f.estado] || esc(f.estado)) + '</div>' +
+    '</div>' +
+    '<p style="font-size:12.5px;margin-top:10px;" id="ficha-desc-' + f.id + '">' + esc(f.descripcion || '') + '</p>' +
+    '<div style="font-size:11px;color:var(--sub);margin-top:8px;"><strong>Meta título:</strong> ' + esc(f.meta_titulo || '—') + '</div>' +
+    '<div style="font-size:11px;color:var(--sub);">' + '<strong>Meta descripción:</strong> ' + esc(f.meta_descripcion || '—') + '</div>' +
+    (keywords.length ? '<div style="font-size:11px;color:var(--sub);margin-top:4px;"><strong>Keywords SEO:</strong> ' + keywords.map(esc).join(', ') + '</div>' : '') +
+    avisoCalidad +
+    '<div id="ficha-editor-' + f.id + '" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">' +
+      '<input type="text" id="edit-titulo-' + f.id + '" class="filter-select" style="width:100%;margin-bottom:6px;" value="' + esc(f.titulo || '') + '" placeholder="Título"/>' +
+      '<textarea id="edit-desc-' + f.id + '" class="filter-select" style="width:100%;min-height:70px;margin-bottom:6px;">' + esc(f.descripcion || '') + '</textarea>' +
+      '<button class="btn-sm btn-solid" onclick="guardarEdicionFicha(' + f.id + ')">Guardar cambios</button> <button class="btn-sm btn-outline" onclick="document.getElementById(\'ficha-editor-' + f.id + '\').style.display=\'none\';">Cancelar</button>' +
+    '</div>' +
+    '<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' + acciones + ' <span id="ficha-resultado-' + f.id + '" class="integ-sub"></span></div>' +
+  '</div>';
+}
+const fichasBorradoresSeguro = fichasBorradores || [];
+const fichasHtml = ultimaFichas
+  ? (fichasBorradoresSeguro.length
+      ? fichasBorradoresSeguro.map(filaFicha).join('')
+      : '<div class="empty-state">El último análisis no generó ningún borrador (sin oportunidades del Agente 4 pendientes de ficha, o todas ya tienen una en revisión/aprobada).</div>')
+  : '<div class="empty-state">El agente de fichas todavía no se ha ejecutado. Lánzalo desde Integraciones.</div>';
+
 // --- Página Rentabilidad (prioridad 1): coste desglosado, transporte al
 //     cliente configurado por categoría/producto/peso (nunca una tarifa
 //     única), margen real (PVP de Shopify) o proyectado (PVP de AFT para
@@ -503,7 +553,7 @@ function estadoRentabilidad(){
 function estadoPipeline(){
   if (!ultimoPipeline) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
   if (ultimoPipeline.status === 'running') {
-    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad', oportunidades: 'analizando oportunidades', demanda: 'analizando demanda/SEO' }[ultimoPipeline.etapa] || 'en curso';
+    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad', oportunidades: 'analizando oportunidades', demanda: 'analizando demanda/SEO', fichas: 'generando fichas' }[ultimoPipeline.etapa] || 'en curso';
     return { dot: 'dot-warn', texto: 'En curso — ' + etiquetaEtapa + '…' };
   }
   if (ultimoPipeline.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
@@ -535,9 +585,19 @@ function estadoDemanda(){
   return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaDemanda.finished_at) };
 }
 const eDem = estadoDemanda();
-const AGENTES_PENDIENTES = [
-  { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' }
-];
+function estadoFichas(){
+  if (!ultimaFichas) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimaFichas.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaFichas.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
+  if (ultimaFichas.status === 'no_conectado') return { dot: 'dot-warn', texto: 'Completado — sin proveedor de IA conectado' };
+  return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaFichas.finished_at) };
+}
+const eFichas = estadoFichas();
+// Todos los agentes que antes estaban "pendientes de recuperar" (fichas,
+// demanda, oportunidades) ya tienen aquí su propia tarjeta real — con
+// botón de ejecución y, si falta la integración externa, su propio
+// indicador "No conectado". No queda ninguno sin agente propio.
+const AGENTES_PENDIENTES = [];
 const integracionesHtml =
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + eImport.dot + '" id="aftEstadoDot"></span><div><div class="integ-name">Importación AFT</div><div class="integ-sub">Catálogo/categorías/stock desde AFT a hmt-db</div></div><span class="integ-status" id="aftEstadoTexto">' + esc(eImport.texto) + '</span></div>' +
@@ -572,15 +632,21 @@ const integracionesHtml =
     '<div class="integ-sub" style="margin-top:8px;">' + (demandaConectada ? 'DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD configurados — consulta volumen de búsqueda y competencia reales.' : 'Sin DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD, solo genera candidatos de keyword a partir del catálogo (marca+categoría+descripción), siempre marcados "sin verificar" — nunca un volumen de búsqueda inventado.') + '</div>' +
   '</div>' +
   '<div class="integ-card">' +
-    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad → Oportunidades → Demanda/SEO, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
+    '<div class="integ-row"><span class="dot ' + eFichas.dot + '" id="fichasEstadoDot"></span><div><div class="integ-name">Fichas de producto con IA ' + (iaConectada ? '<span class="badge badge-ok">IA conectada</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</div><div class="integ-sub">Agente 6 — título, descripción y SEO a partir de AFT + Oportunidades; revisión humana obligatoria, nunca publica en Shopify</div></div><span class="integ-status" id="fichasEstadoTexto">' + esc(eFichas.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarFichas(this)">Generar fichas</button><span id="fichasResultado" class="integ-sub"></span></div>' +
+    (ultimaFichas ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaFichas.total_candidatos) + ' candidatos · ' + num(ultimaFichas.generados) + ' generados · ' + num(ultimaFichas.con_avisos_calidad) + ' con avisos de calidad</div>' : '') +
+    '<div class="integ-sub" style="margin-top:8px;">' + (iaConectada ? 'ANTHROPIC_API_KEY configurada — genera borradores reales, limitados a un máximo por ejecución (control de coste). Revísalos en la página "Fichas IA".' : 'Sin ANTHROPIC_API_KEY, no se genera ningún borrador — nunca se simula un resultado de IA.') + '</div>' +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad → Oportunidades → Demanda/SEO → Fichas IA, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
     '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo. El paso de reposición dentro del pipeline sigue en DRY RUN salvo que SHOPIFY_WRITE_ENABLED esté activo.</div>' +
   '</div>' +
-  '<div class="integ-card">' +
+  (AGENTES_PENDIENTES.length ? '<div class="integ-card">' +
     '<div class="integ-name" style="margin-bottom:10px;">Agentes pendientes de recuperar</div>' +
     AGENTES_PENDIENTES.map(a => '<div class="integ-row" style="margin-bottom:8px;"><span class="dot" style="background:#D1D5DB;"></span><div><div class="integ-name" style="font-size:12.5px;">' + esc(a.nombre) + '</div><div class="integ-sub">' + esc(a.detalle) + '</div></div><span class="integ-status" style="color:#9CA3AF;">No conectado</span></div>').join('') +
     '<div class="integ-sub" style="margin-top:4px;">Estas funciones existían en el panel original (de otros agentes, fuera de este repositorio) y todavía no se han conectado a una fuente de datos real — el panel no simula sus resultados.</div>' +
-  '</div>';
+  '</div>' : '');
 
 // --- HTML completo ---
 const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title><style>' +
@@ -684,6 +750,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
 '<a class="sb-link" data-page="rentabilidad" onclick="ir(this)">' + icon('alertTri', 17) + '<span>Rentabilidad</span></a>' +
 '<a class="sb-link" data-page="actividad" onclick="ir(this)">' + icon('activity', 17) + '<span>Actividad</span></a>' +
+'<a class="sb-link" data-page="fichas" onclick="ir(this)">' + icon('fileText', 17) + '<span>Fichas IA</span></a>' +
 '<div class="sb-sep"></div>' +
 '<a class="sb-link" data-page="integraciones" onclick="ir(this)">' + icon('plug', 17) + '<span>Integraciones</span></a>' +
 '<a class="sb-link" data-page="configuracion" onclick="ir(this)">' + icon('settings', 17) + '<span>Configuración</span></a>' +
@@ -714,6 +781,11 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + resumenEjecutivoHtml + rentabilidadHtml + recomendacionesHtml + '</div>' +
 
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
+
+'<div class="page" id="page-fichas"><div class="pagetitle">Fichas de producto con IA ' + (iaConectada ? '<span class="badge badge-ok">IA conectada</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</div>' +
+'<p style="font-size:11.5px;color:var(--sub);margin:-8px 0 16px;">Agente 6 — borradores generados a partir de datos reales de AFT y de las oportunidades del Agente 4. Revisión humana obligatoria: Aprobar/Rechazar/Editar solo cambian el estado en esta base de datos — ningún borrador se publica en Shopify automáticamente desde aquí.</p>' +
+fichasHtml +
+'</div>' +
 
 '<div class="page" id="page-integraciones"><div class="pagetitle">Integraciones</div>' + integracionesHtml + '</div>' +
 
@@ -757,6 +829,14 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function formatearFaseDem(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin fuente conectada: "+(run.total_keywords||0)+" keywords sugeridas (sin verificar).";}if(run.status==="success"){return "Keywords: "+(run.total_keywords||0)+" \\u00b7 Con volumen real: "+(run.verificadas||0)+" \\u00b7 Sin verificar: "+(run.sugeridas_sin_verificar||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollDemEstado(btn,out){pararPollDem();demPollTimer=setInterval(function(){fetch("/api/demanda-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseDem(run);if(!run||run.status==="running"){return;}pararPollDem();btn.disabled=false;btn.textContent="Analizar demanda";if(run.status==="success"){if(out)out.style.color="#059669";}else if(run.status==="no_conectado"){if(out)out.style.color="#D97706";}else{if(out)out.style.color="#DC2626";}var dot=document.getElementById("demEstadoDot");if(dot)dot.className="dot "+(run.status==="error"?"dot-err":"dot-ok");location.reload();}).catch(function(){});},2000);}' +
 'function ejecutarDemanda(btn){pararPollDem();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("demResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/demanda-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollDemEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollDemEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var fichasPollTimer=null;' +
+'function pararPollFichas(){if(fichasPollTimer){clearInterval(fichasPollTimer);fichasPollTimer=null;}}' +
+'function formatearFaseFichas(run){if(!run)return "Iniciando...";if(run.status==="running")return "Generando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin proveedor de IA conectado: "+(run.total_candidatos||0)+" candidatos, 0 generados.";}if(run.status==="success"){return "Candidatos: "+(run.total_candidatos||0)+" \\u00b7 Generados: "+(run.generados||0)+" \\u00b7 Con avisos de calidad: "+(run.con_avisos_calidad||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollFichasEstado(btn,out){pararPollFichas();fichasPollTimer=setInterval(function(){fetch("/api/fichas-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseFichas(run);if(!run||run.status==="running"){return;}pararPollFichas();btn.disabled=false;btn.textContent="Generar fichas";if(run.status==="success"){if(out)out.style.color="#059669";}else if(run.status==="no_conectado"){if(out)out.style.color="#D97706";}else{if(out)out.style.color="#DC2626";}var dot=document.getElementById("fichasEstadoDot");if(dot)dot.className="dot "+(run.status==="error"?"dot-err":"dot-ok");location.reload();}).catch(function(){});},2000);}' +
+'function ejecutarFichas(btn){pararPollFichas();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Generando...";var out=document.getElementById("fichasResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/fichas-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollFichasEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollFichasEstado(btn,out);}else{btn.disabled=false;btn.textContent="Generar fichas";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Generar fichas";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'function revisarFicha(id,accion,btn){var out=document.getElementById("ficha-resultado-"+id);var verbo=accion==="aprobar"?"Aprobando...":"Rechazando...";if(btn){btn.disabled=true;}if(out){out.textContent=verbo;out.style.color="";}fetch("/api/fichas/"+id+"/"+accion,{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===200&&res.data&&res.data.ok){location.reload();}else{if(btn)btn.disabled=false;if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){if(btn)btn.disabled=false;if(out){out.textContent="Error de red.";out.style.color="#DC2626";}});}' +
+'function editarFicha(id){var ed=document.getElementById("ficha-editor-"+id);if(ed)ed.style.display=ed.style.display==="none"?"block":"none";}' +
+'function guardarEdicionFicha(id){var titulo=document.getElementById("edit-titulo-"+id).value;var descripcion=document.getElementById("edit-desc-"+id).value;var out=document.getElementById("ficha-resultado-"+id);if(out){out.textContent="Guardando...";out.style.color="";}fetch("/api/fichas/"+id+"/editar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({titulo:titulo,descripcion:descripcion})}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===200&&res.data&&res.data.ok){location.reload();}else{if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){if(out){out.textContent="Error de red.";out.style.color="#DC2626";}});}' +
 'var pipelinePollTimer=null;' +
 'function pararPollPipeline(){if(pipelinePollTimer){clearInterval(pipelinePollTimer);pipelinePollTimer=null;}}' +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +

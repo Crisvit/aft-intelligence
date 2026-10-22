@@ -11,6 +11,7 @@ const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/ren
 const { ejecutarReposicionStock } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
+const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -44,6 +45,7 @@ function basicAuth(req, res, next) {
     res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
     return res.status(401).send('Credenciales incorrectas.');
   }
+  req.dashboardUser = user;
   next();
 }
 
@@ -87,7 +89,7 @@ app.get('/status', basicAuth, async (req, res) => {
 const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
 const TABLA_POR_TIPO = {
   aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs',
-  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs', demanda: 'demanda_runs'
+  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs', demanda: 'demanda_runs', fichas: 'fichas_runs'
 };
 
 async function haySolapamiento() {
@@ -99,6 +101,7 @@ async function haySolapamiento() {
     UNION ALL SELECT 'reposicion', id, started_at FROM reposicion_runs WHERE status = 'running'
     UNION ALL SELECT 'oportunidades', id, started_at FROM oportunidades_runs WHERE status = 'running'
     UNION ALL SELECT 'demanda', id, started_at FROM demanda_runs WHERE status = 'running'
+    UNION ALL SELECT 'fichas', id, started_at FROM fichas_runs WHERE status = 'running'
     ORDER BY started_at ASC LIMIT 1
   `);
   if (!rows.length) return null;
@@ -352,6 +355,74 @@ app.get('/api/demanda-run/estado', basicAuth, async (req, res) => {
   }
 });
 
+// Agente 6: fichas de producto con IA. Genera borradores (título,
+// descripción, atributos, SEO) a partir de datos reales de AFT y de las
+// oportunidades del Agente 4, SOLO si ANTHROPIC_API_KEY está configurada
+// — si no, termina con status 'no_conectado' y no genera nada. Nunca
+// publica en Shopify: aprobar/rechazar/editar son cambios de estado en
+// PostgreSQL únicamente.
+app.post('/api/fichas-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO fichas_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarGeneracionFichas(runId).catch((e) => {
+      console.error('[fichas-run] Error en la generación en segundo plano:', e.message);
+    });
+  } catch (e) {
+    console.error('[fichas-run] Error al iniciar la generación:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/fichas-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM fichas_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[fichas-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Revisión humana de un borrador — SOLO cambia su estado en PostgreSQL.
+// Esta ruta, igual que el resto del agente, no llama nunca a Shopify.
+app.post('/api/fichas/:id/aprobar', basicAuth, async (req, res) => {
+  try {
+    const borrador = await revisarBorrador(Number(req.params.id), 'aprobado', req.dashboardUser);
+    res.json({ ok: true, borrador });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/fichas/:id/rechazar', basicAuth, async (req, res) => {
+  try {
+    const borrador = await revisarBorrador(Number(req.params.id), 'rechazado', req.dashboardUser);
+    res.json({ ok: true, borrador });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/fichas/:id/editar', basicAuth, express.json(), async (req, res) => {
+  try {
+    const borrador = await editarBorrador(Number(req.params.id), req.body || {}, req.dashboardUser);
+    res.json({ ok: true, borrador });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 // Automatización (prioridad 2): encadena importación AFT -> sincronización
 // Shopify (solo lectura) -> análisis de rentabilidad, en ese orden, en
 // segundo plano. Cada etapa sigue usando su propia tabla de progreso —
@@ -414,6 +485,14 @@ async function lanzarPipelineCompleto() {
       const demRunId = demRows[0].id;
       await pool.query(`UPDATE pipeline_runs SET demanda_run_id = $2 WHERE id = $1`, [pipelineId, demRunId]);
       await ejecutarAnalisisDemanda(demRunId);
+
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'fichas' WHERE id = $1`, [pipelineId]);
+      const { rows: fichasRows } = await pool.query(
+        `INSERT INTO fichas_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const fichasRunId = fichasRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET fichas_run_id = $2 WHERE id = $1`, [pipelineId, fichasRunId]);
+      await ejecutarGeneracionFichas(fichasRunId);
 
       await pool.query(`UPDATE pipeline_runs SET status = 'success', finished_at = now(), etapa = 'done' WHERE id = $1`, [pipelineId]);
     } catch (e) {
@@ -589,6 +668,17 @@ async function renderDashboard() {
     `SELECT ref, keyword, origen, volumen_busqueda, competencia, verificado FROM demanda_resultados ORDER BY ref, verificado DESC, keyword LIMIT 500`
   );
 
+  // Agente 6 (fichas IA) — borradores pendientes de revisión primero,
+  // después los ya revisados más recientes. Nunca se publica nada en
+  // Shopify desde esta consulta ni desde ninguna ruta de este agente.
+  const { rows: ultimaFichasRows } = await pool.query(`SELECT * FROM fichas_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaFichas = ultimaFichasRows[0] || null;
+  const { rows: fichasBorradores } = await pool.query(
+    `SELECT * FROM fichas_borradores
+     ORDER BY CASE estado WHEN 'pendiente' THEN 0 ELSE 1 END, creado_en DESC
+     LIMIT 200`
+  );
+
   // Catálogo completo de Shopify (todas las variantes, ya leídas por
   // getAllVariants y guardadas por runInventorySync) cruzado con el
   // matching real para identificar el proveedor — nunca por vendor ni por
@@ -628,7 +718,9 @@ async function renderDashboard() {
     shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED,
     ultimaOportunidades,
     ultimaDemanda, demandaResultados,
-    demandaConectada: hayIntegracionDemandaConfigurada()
+    demandaConectada: hayIntegracionDemandaConfigurada(),
+    ultimaFichas, fichasBorradores,
+    iaConectada: hayProveedorIaConfigurado()
   });
 
   cache = { html, builtAt: now };
