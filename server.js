@@ -6,9 +6,10 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
-const { runInventorySync, ingestAft, BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
+const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
 const { ejecutarReposicionStock } = require('./src/reposicion');
+const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const shopify = require('./src/shopifyClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -85,7 +86,7 @@ app.get('/status', basicAuth, async (req, res) => {
 const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
 const TABLA_POR_TIPO = {
   aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs',
-  reposicion: 'reposicion_runs'
+  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs'
 };
 
 async function haySolapamiento() {
@@ -95,6 +96,7 @@ async function haySolapamiento() {
     UNION ALL SELECT 'rentabilidad', id, started_at FROM rentabilidad_runs WHERE status = 'running'
     UNION ALL SELECT 'pipeline', id, started_at FROM pipeline_runs WHERE status = 'running'
     UNION ALL SELECT 'reposicion', id, started_at FROM reposicion_runs WHERE status = 'running'
+    UNION ALL SELECT 'oportunidades', id, started_at FROM oportunidades_runs WHERE status = 'running'
     ORDER BY started_at ASC LIMIT 1
   `);
   if (!rows.length) return null;
@@ -275,6 +277,42 @@ app.get('/api/rentabilidad-run/estado', basicAuth, async (req, res) => {
   }
 });
 
+// Agente 4: oportunidades comerciales, como proceso independiente con su
+// propio historial. Solo lee shopify_match/aft_catalogo ya guardados — no
+// llama a AFT ni a Shopify, no escribe nada fuera de hmt-db.
+app.post('/api/oportunidades-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO oportunidades_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarAnalisisOportunidades(runId).catch((e) => {
+      console.error('[oportunidades-run] Error en el análisis en segundo plano:', e.message);
+    });
+  } catch (e) {
+    console.error('[oportunidades-run] Error al iniciar el análisis:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/oportunidades-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM oportunidades_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[oportunidades-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // Automatización (prioridad 2): encadena importación AFT -> sincronización
 // Shopify (solo lectura) -> análisis de rentabilidad, en ese orden, en
 // segundo plano. Cada etapa sigue usando su propia tabla de progreso —
@@ -321,6 +359,14 @@ async function lanzarPipelineCompleto() {
       const rentRunId = rentRows[0].id;
       await pool.query(`UPDATE pipeline_runs SET rentabilidad_run_id = $2 WHERE id = $1`, [pipelineId, rentRunId]);
       await ejecutarAnalisisRentabilidad(rentRunId);
+
+      await pool.query(`UPDATE pipeline_runs SET etapa = 'oportunidades' WHERE id = $1`, [pipelineId]);
+      const { rows: opRows } = await pool.query(
+        `INSERT INTO oportunidades_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+      );
+      const opRunId = opRows[0].id;
+      await pool.query(`UPDATE pipeline_runs SET oportunidades_run_id = $2 WHERE id = $1`, [pipelineId, opRunId]);
+      await ejecutarAnalisisOportunidades(opRunId);
 
       await pool.query(`UPDATE pipeline_runs SET status = 'success', finished_at = now(), etapa = 'done' WHERE id = $1`, [pipelineId]);
     } catch (e) {
@@ -470,28 +516,21 @@ async function renderDashboard() {
     `SELECT ref, tipo, detalle, detectado_en FROM incidencias ORDER BY detectado_en DESC LIMIT 100`
   );
 
-  // Oportunidades reales: referencias AFT de marcas/categorías comerciales
-  // que el último control de inventario NO encontró en Shopify (prioridad 2
-  // — separado del control de inventario, que cruza TODAS las referencias).
-  // Se priorizan Wolfpack/Samurai/Maurer/Papillon/Saturnia (configurable vía
-  // AFT_BRANDS_PRIORITARIAS), y dentro de cada grupo, por margen.
-  const { rows: oportunidadRowsRaw } = await pool.query(
-    `SELECT sm.ref, sm.ean, sm.marca, c.descripcion_corta AS descripcion, sm.stock_aft AS stock,
-            sm.precio_venta_aft AS precio, sm.coste_para_margen AS coste,
-            sm.margen_con_precio_aft_pct AS "margenPct"
-     FROM shopify_match sm
-     JOIN aft_catalogo c ON c.ref = sm.ref
-     WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true AND sm.stock_aft >= $1
-     LIMIT 500`,
-    [STOCK_MINIMO_OPORTUNIDAD]
+  // Agente 4 (oportunidades), ya persistido por src/oportunidades.js — se
+  // lee su última foto en vez de recalcularla aquí en cada carga. Orden:
+  // score explicable descendente (marca prioritaria + margen + stock,
+  // ver motivo por fila).
+  const { rows: ultimaOportunidadesRows } = await pool.query(`SELECT * FROM oportunidades_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaOportunidades = ultimaOportunidadesRows[0] || null;
+  const { rows: oportunidadRows } = await pool.query(
+    `SELECT ref, ean, marca, descripcion, categoria_nombre, stock_aft AS stock, coste,
+            portes_proveedor_aft, pvp_recomendado AS precio, margen_pct AS "margenPct",
+            es_marca_prioritaria AS "esPrioritaria", es_candidato_complementario AS "esComplementaria",
+            score, motivo
+     FROM oportunidades_resultados
+     ORDER BY score DESC NULLS LAST, margen_pct DESC NULLS LAST
+     LIMIT 500`
   );
-  const esPrioritaria = (marca) => BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
-  const oportunidadRows = oportunidadRowsRaw.slice().sort((a, b) => {
-    const prioA = esPrioritaria(a.marca) ? 1 : 0;
-    const prioB = esPrioritaria(b.marca) ? 1 : 0;
-    if (prioA !== prioB) return prioB - prioA;
-    return (Number(b.margenPct) || 0) - (Number(a.margenPct) || 0);
-  }).slice(0, 200).map((r) => ({ ...r, esPrioritaria: esPrioritaria(r.marca) }));
 
   // Catálogo completo de Shopify (todas las variantes, ya leídas por
   // getAllVariants y guardadas por runInventorySync) cruzado con el
@@ -529,7 +568,8 @@ async function renderDashboard() {
     stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD,
     totalesCatalogo, shopifyAdminStore,
     ultimaReposicion, reposicionEventos,
-    shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED
+    shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED,
+    ultimaOportunidades
   });
 
   cache = { html, builtAt: now };

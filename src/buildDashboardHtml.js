@@ -23,7 +23,8 @@ function buildDashboardHtml({
   shopifyAdminStore,
   ultimaReposicion,
   reposicionEventos,
-  shopifyWriteEnabled
+  shopifyWriteEnabled,
+  ultimaOportunidades
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -277,22 +278,24 @@ const marcasOportunidad = Array.from(new Set(oportunidadRows.map(c => titleCase(
 function filaOportunidad(c){
   const margen = c.margenPct != null ? Number(c.margenPct) : null;
   return '<tr data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '">' +
-    '<td data-label="Producto">' + esc(titleCase(c.descripcion || c.ref)) + '</td>' +
-    '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + (c.esPrioritaria ? ' <span class="badge badge-ok">Prioritaria</span>' : '') + '</td>' +
+    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(c.descripcion || c.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(c.ref) + (c.categoria_nombre ? ' · ' + esc(titleCase(c.categoria_nombre)) : '') + '</div></td>' +
+    '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + (c.esPrioritaria ? ' <span class="badge badge-ok">Prioritaria</span>' : '') + (c.esComplementaria ? ' <span class="badge badge-off" style="background:#F5F3FF;color:#7C3AED;">Complementaria</span>' : '') + '</td>' +
     '<td class="num" data-label="Stock AFT">' + num(c.stock) + '</td>' +
     '<td class="num" data-label="Coste">' + eur(c.coste) + '</td>' +
     '<td class="num" data-label="PVP recomendado">' + eur(c.precio) + '</td>' +
     '<td class="num ok" data-label="Margen">' + (margen != null ? pct(margen) : '—') + '</td>' +
+    '<td class="num" data-label="Score">' + (c.score != null ? Number(c.score).toFixed(0) + '/100' : '—') + '</td>' +
     '<td data-label="Enlaces">' + copiarReferenciaBtn(c.ref) + '</td>' +
-  '</tr>';
+    '</tr>' +
+    '<tr class="row-detalle" data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '"><td colspan="8" style="font-size:11px;color:var(--sub);padding-top:0;padding-bottom:10px;">' + esc(c.motivo || '') + '</td></tr>';
 }
 const oportunidadesHtml = oportunidadRows.length
   ? '<div class="filterbar">' +
       '<select id="filtroMarca" class="filter-select" onchange="filtrarOportunidades()"><option value="">Todas las marcas</option>' + marcasOportunidad.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select>' +
       '<select id="filtroMargen" class="filter-select" onchange="filtrarOportunidades()"><option value="0">Cualquier margen</option><option value="20">20%+</option><option value="30">30%+</option><option value="40">40%+</option></select>' +
     '</div>' +
-    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Orden: marcas prioritarias (Wolfpack/Samurai/Maurer/Papillon/Saturnia) primero, después por margen — ambos configurables por variable de entorno.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
+    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' del último análisis del Agente 4' + (ultimaOportunidades ? ' (' + tiempoRelativo(ultimaOportunidades.finished_at) + ')' : '') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Puntuación explicable (ver motivo bajo cada fila): marca prioritaria + margen proyectado + stock — nunca una señal de demanda externa inventada.</div>' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Score</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
     oportunidadRows.map(filaOportunidad).join('') +
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
@@ -473,7 +476,7 @@ function estadoRentabilidad(){
 function estadoPipeline(){
   if (!ultimoPipeline) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
   if (ultimoPipeline.status === 'running') {
-    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad' }[ultimoPipeline.etapa] || 'en curso';
+    const etiquetaEtapa = { import_aft: 'importando AFT', sync_shopify: 'sincronizando Shopify', reposicion: 'reponiendo stock', rentabilidad: 'calculando rentabilidad', oportunidades: 'analizando oportunidades' }[ultimoPipeline.etapa] || 'en curso';
     return { dot: 'dot-warn', texto: 'En curso — ' + etiquetaEtapa + '…' };
   }
   if (ultimoPipeline.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
@@ -490,10 +493,16 @@ const eSync = estadoSync();
 const eRent = estadoRentabilidad();
 const ePipeline = estadoPipeline();
 const eRepo = estadoReposicion();
+function estadoOportunidades(){
+  if (!ultimaOportunidades) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimaOportunidades.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaOportunidades.status === 'error') return { dot: 'dot-err', texto: 'Error en el último análisis' };
+  return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaOportunidades.finished_at) };
+}
+const eOp = estadoOportunidades();
 const AGENTES_PENDIENTES = [
   { nombre: 'Fichas automáticas (IA)', detalle: 'Generación y revisión de fichas nuevas en Shopify.' },
-  { nombre: 'Señales de demanda / keywords', detalle: 'Volumen de búsqueda, interés por producto y palabras clave (SEO).' },
-  { nombre: 'Scoring de oportunidades con demanda externa', detalle: 'El ranking actual de Oportunidades ya usa datos reales (marca prioritaria + margen); esto añadiría demanda de mercado externa, que todavía no está conectada.' }
+  { nombre: 'Señales de demanda / keywords', detalle: 'Volumen de búsqueda, interés por producto y palabras clave (SEO).' }
 ];
 const integracionesHtml =
   '<div class="integ-card">' +
@@ -518,7 +527,12 @@ const integracionesHtml =
     (ultimaRentabilidad ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaRentabilidad.procesados) + ' analizados · ' + num(ultimaRentabilidad.en_perdida) + ' en pérdida · ' + num(ultimaRentabilidad.margen_bajo) + ' margen bajo · ' + num(ultimaRentabilidad.diferencia_coste) + ' con diferencia de coste</div>' : '') +
   '</div>' +
   '<div class="integ-card">' +
-    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
+    '<div class="integ-row"><span class="dot ' + eOp.dot + '" id="opEstadoDot"></span><div><div class="integ-name">Oportunidades comerciales</div><div class="integ-sub">Agente 4 — puntúa y explica (marca prioritaria + margen + stock), solo lee hmt-db</div></div><span class="integ-status" id="opEstadoTexto">' + esc(eOp.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarOportunidades(this)">Analizar oportunidades</button><span id="opResultado" class="integ-sub"></span></div>' +
+    (ultimaOportunidades ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaOportunidades.total_candidatos) + ' candidatos · ' + num(ultimaOportunidades.prioritarias) + ' de marca prioritaria · ' + num(ultimaOportunidades.complementarias) + ' candidatas a venta complementaria</div>' : '') +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + ePipeline.dot + '" id="pipelineEstadoDot"></span><div><div class="integ-name">Pipeline completo (automatización)</div><div class="integ-sub">Importar AFT → Sincronizar Shopify → Reposición de stock → Rentabilidad → Oportunidades, en secuencia</div></div><span class="integ-status" id="pipelineEstadoTexto">' + esc(ePipeline.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarPipeline(this)">Ejecutar pipeline completo</button><span id="pipelineResultado" class="integ-sub"></span></div>' +
     '<div class="integ-sub" style="margin-top:8px;">Solo se ejecuta cuando lo lanzas aquí o si se activa explícitamente la variable de entorno PIPELINE_SCHEDULE_HORA_MADRID (hora fija diaria, Europe/Madrid) — desplegar este código no programa nada por sí solo. El paso de reposición dentro del pipeline sigue en DRY RUN salvo que SHOPIFY_WRITE_ENABLED esté activo.</div>' +
   '</div>' +
@@ -693,6 +707,11 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'function formatearFaseRent(run){if(!run)return "Iniciando...";if(run.status==="running"){return "Analizando: "+(run.fase||"procesando")+(run.total_analizados?" ("+(run.procesados||0)+"/"+run.total_analizados+")":"")+"...";}if(run.status==="success"){return "Analizados: "+(run.procesados||0)+" \\u00b7 P\\u00e9rdida: "+(run.en_perdida||0)+" \\u00b7 Margen bajo: "+(run.margen_bajo||0)+" \\u00b7 Diferencia coste: "+(run.diferencia_coste||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollRentEstado(btn,out){pararPollRent();rentPollTimer=setInterval(function(){fetch("/api/rentabilidad-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseRent(run);if(!run||run.status!=="running"){pararPollRent();btn.disabled=false;btn.textContent="Analizar rentabilidad";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("rentEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("rentEstadoTexto");if(txt)txt.textContent="Actualizado ahora mismo";}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
 'function ejecutarRentabilidad(btn){pararPollRent();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("rentResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/rentabilidad-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollRentEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollRentEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar rentabilidad";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar rentabilidad";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var opPollTimer=null;' +
+'function pararPollOp(){if(opPollTimer){clearInterval(opPollTimer);opPollTimer=null;}}' +
+'function formatearFaseOp(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="success"){return "Candidatos: "+(run.total_candidatos||0)+" \\u00b7 Prioritarias: "+(run.prioritarias||0)+" \\u00b7 Complementarias: "+(run.complementarias||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollOpEstado(btn,out){pararPollOp();opPollTimer=setInterval(function(){fetch("/api/oportunidades-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseOp(run);if(!run||run.status!=="running"){pararPollOp();btn.disabled=false;btn.textContent="Analizar oportunidades";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("opEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("opEstadoTexto");if(txt)txt.textContent="Actualizado ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},2000);}' +
+'function ejecutarOportunidades(btn){pararPollOp();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("opResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/oportunidades-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollOpEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollOpEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar oportunidades";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar oportunidades";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 'var pipelinePollTimer=null;' +
 'function pararPollPipeline(){if(pipelinePollTimer){clearInterval(pipelinePollTimer);pipelinePollTimer=null;}}' +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +

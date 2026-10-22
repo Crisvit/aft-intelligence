@@ -358,3 +358,45 @@ CREATE TABLE IF NOT EXISTS reposicion_eventos (
   detalle                     TEXT,
   detectado_en                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Agente 4 — Oportunidades comerciales como proceso independiente con su
+-- propio historial, en vez de recalcularse en cada carga del dashboard
+-- (como antes). Reutiliza exactamente el mismo universo ya calculado por
+-- sync.js (shopify_match.es_oportunidad_comercial) — no se inventa ni
+-- duplica ese filtro, solo se puntúa y explica.
+CREATE TABLE IF NOT EXISTS oportunidades_runs (
+  id                SERIAL PRIMARY KEY,
+  started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at       TIMESTAMPTZ,
+  status            TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  fase              TEXT,
+  total_candidatos  INTEGER DEFAULT 0,
+  prioritarias      INTEGER DEFAULT 0,
+  complementarias   INTEGER DEFAULT 0,
+  error_message     TEXT
+);
+
+-- Foto de la última ejecución (se reemplaza entera cada run, como
+-- rentabilidad_resultados). "score" y "motivo" son siempre explicables a
+-- partir de datos reales (marca, margen proyectado, stock) — nunca una
+-- señal de demanda externa inventada (eso es el Agente 5, solo si hay una
+-- fuente real conectada).
+CREATE TABLE IF NOT EXISTS oportunidades_resultados (
+  ref                          TEXT PRIMARY KEY,
+  ean                          TEXT,
+  marca                        TEXT,
+  descripcion                  TEXT,
+  categoria_nombre             TEXT,
+  stock_aft                    INTEGER,
+  coste                        NUMERIC,
+  portes_proveedor_aft         NUMERIC,
+  pvp_recomendado              NUMERIC,
+  margen_pct                   NUMERIC,
+  es_marca_prioritaria         BOOLEAN DEFAULT false,
+  es_candidato_complementario  BOOLEAN DEFAULT false,
+  score                        NUMERIC,
+  motivo                       TEXT,
+  checked_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS oportunidades_run_id INTEGER;
