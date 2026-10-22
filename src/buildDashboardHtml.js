@@ -371,10 +371,13 @@ function filaFicha(f){
   '</div>';
 }
 const fichasBorradoresSeguro = fichasBorradores || [];
+const fichasEmptyMotivo = ultimaFichas && ultimaFichas.status === 'no_conectado'
+  ? 'El último análisis encontró ' + (ultimaFichas.total_candidatos || 0) + ' candidato(s) del Agente 4, pero no generó ningún borrador: no hay proveedor de IA conectado (ANTHROPIC_API_KEY). Nunca se presenta una plantilla como si fuera una ficha generada por IA.'
+  : 'El último análisis no generó ningún borrador (sin oportunidades del Agente 4 pendientes de ficha, o todas ya tienen una en revisión/aprobada).';
 const fichasHtml = ultimaFichas
   ? (fichasBorradoresSeguro.length
       ? fichasBorradoresSeguro.map(filaFicha).join('')
-      : '<div class="empty-state">El último análisis no generó ningún borrador (sin oportunidades del Agente 4 pendientes de ficha, o todas ya tienen una en revisión/aprobada).</div>')
+      : '<div class="empty-state">' + esc(fichasEmptyMotivo) + '</div>')
   : '<div class="empty-state">El agente de fichas todavía no se ha ejecutado. Lánzalo desde Integraciones.</div>';
 
 // --- Página Rentabilidad (prioridad 1): coste desglosado, transporte al
