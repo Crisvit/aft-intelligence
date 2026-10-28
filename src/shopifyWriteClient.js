@@ -3,9 +3,13 @@
 // siendo 100% lectura) para que el único camino de escritura de todo el
 // código sea fácil de auditar en un solo archivo pequeño.
 //
-// Usado exclusivamente por src/reposicion.js (Agente 2 — reposición
-// automática de stock). Nunca se llama directamente desde server.js ni
-// desde ninguna ruta. Solo escribe de verdad si, en src/reposicion.js:
+// Las mutaciones (establecerStockDisponible) las usa exclusivamente
+// src/reposicion.js (Agente 2 — reposición automática de stock). La
+// consulta de solo lectura listarScopesConcedidos/tieneScopeEscrituraInventario
+// también la llama server.js directamente, para el diagnóstico de scopes
+// (GET /api/shopify-scopes) — nunca escribe nada, así que exponerla fuera
+// de reposicion.js no abre ningún camino de escritura nuevo. Solo escribe
+// de verdad si, en src/reposicion.js:
 //   1. SHOPIFY_WRITE_ENABLED=true está definido explícitamente, Y
 //   2. tieneScopeEscrituraInventario() confirma que la app tiene
 //      concedido el scope write_inventory (se comprueba en cada
@@ -35,15 +39,25 @@ async function shopifyGraphqlEscritura(token, query, variables) {
   return json.data;
 }
 
+// Lista completa de scopes REALMENTE concedidos a la app — consulta de
+// solo lectura (currentAppInstallation.accessScopes no es una mutación),
+// pensada para poder comprobar el permiso write_inventory en cualquier
+// momento sin necesidad de SHOPIFY_WRITE_ENABLED=true ni de lanzar ningún
+// agente de escritura.
+async function listarScopesConcedidos(token) {
+  const query = `{ currentAppInstallation { accessScopes { handle } } }`;
+  const data = await shopifyGraphqlEscritura(token, query);
+  const scopes = (data.currentAppInstallation && data.currentAppInstallation.accessScopes) || [];
+  return scopes.map((s) => s.handle);
+}
+
 // Comprueba los scopes REALMENTE concedidos a la app — nunca se asume que
 // write_inventory está disponible solo porque SHOPIFY_WRITE_ENABLED=true.
 // Si la app todavía no tiene ese permiso, el agente se queda en dry run
 // aunque la variable de entorno esté activa.
 async function tieneScopeEscrituraInventario(token) {
-  const query = `{ currentAppInstallation { accessScopes { handle } } }`;
-  const data = await shopifyGraphqlEscritura(token, query);
-  const scopes = (data.currentAppInstallation && data.currentAppInstallation.accessScopes) || [];
-  return scopes.some((s) => s.handle === 'write_inventory');
+  const scopes = await listarScopesConcedidos(token);
+  return scopes.includes('write_inventory');
 }
 
 const SET_QUANTITIES_MUTATION = `
@@ -102,4 +116,4 @@ async function leerStockDisponible(token, { inventoryItemId, locationId }) {
   return q ? q.quantity : null;
 }
 
-module.exports = { tieneScopeEscrituraInventario, establecerStockDisponible, leerStockDisponible };
+module.exports = { tieneScopeEscrituraInventario, listarScopesConcedidos, establecerStockDisponible, leerStockDisponible };

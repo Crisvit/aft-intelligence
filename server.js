@@ -1,7 +1,9 @@
 // AFT 2.0 — dashboard independiente de Herramitienda.
-// Lee AFT y Shopify (solo lectura), guarda en hmt-db (Postgres propio),
-// sirve el panel con el renderer original. No existe código de escritura
-// hacia Shopify en todo este proyecto.
+// Lee AFT y Shopify, guarda en hmt-db (Postgres propio), sirve el panel
+// con el renderer original. El único código de escritura real hacia
+// Shopify vive aislado en src/shopifyWriteClient.js (ver ese archivo):
+// solo toca stock "available", nunca precios ni costes, y solo si está
+// explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -13,6 +15,7 @@ const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
+const shopifyWrite = require('./src/shopifyWriteClient');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
 const app = express();
@@ -77,6 +80,23 @@ app.get('/status', basicAuth, async (req, res) => {
     result.shopify = { ok: false, error: e.message };
   }
   res.json(result);
+});
+
+// Diagnóstico de solo lectura: qué scopes tiene REALMENTE concedidos la
+// app de Shopify ahora mismo — en particular, write_inventory. Consulta
+// currentAppInstallation.accessScopes (una query, nunca una mutación), así
+// que no requiere SHOPIFY_WRITE_ENABLED=true ni escribe nada. Pensado para
+// poder confirmar el permiso antes de activar cualquier escritura real,
+// sin tener que lanzar un agente completo para averiguarlo.
+app.get('/api/shopify-scopes', basicAuth, async (req, res) => {
+  try {
+    const token = await shopify.getShopifyToken();
+    const scopes = await shopifyWrite.listarScopesConcedidos(token);
+    res.json({ ok: true, scopes, tieneWriteInventory: scopes.includes('write_inventory'), checkedAt: new Date().toISOString() });
+  } catch (e) {
+    console.error('[shopify-scopes] Error al consultar los scopes:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
 });
 
 // Los cuatro agentes en segundo plano (importar AFT, sincronizar Shopify,
@@ -527,6 +547,25 @@ app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
     res.json({ ok: true, run: rows[0] || null });
   } catch (e) {
     console.error('[pipeline-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Historial de solo lectura (últimas N ejecuciones, 10 por defecto) —
+// pensado para confirmar si la programación diaria (PIPELINE_SCHEDULE_HORA_MADRID)
+// está corriendo de verdad día a día, sin tener que lanzar un pipeline
+// nuevo solo para comprobarlo. No modifica nada.
+app.get('/api/pipeline-run/historial', basicAuth, async (req, res) => {
+  try {
+    const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 10, 1), 100);
+    const { rows } = await pool.query(
+      `SELECT id, status, etapa, started_at, finished_at, error_message
+       FROM pipeline_runs ORDER BY id DESC LIMIT $1`,
+      [limite]
+    );
+    res.json({ ok: true, runs: rows });
+  } catch (e) {
+    console.error('[pipeline-run/historial] Error leyendo el historial:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });

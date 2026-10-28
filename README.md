@@ -258,6 +258,7 @@ El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline c
 |---|---|
 | `GET /` | Dashboard (requiere Basic Auth) |
 | `GET /status` | Estado de conexión a hmt-db y Shopify, sin exponer secretos |
+| `GET /api/shopify-scopes` | Diagnóstico de solo lectura: lista los scopes REALMENTE concedidos a la app de Shopify ahora mismo (en particular, si tiene `write_inventory`) — consulta `currentAppInstallation.accessScopes`, nunca una mutación; no requiere `SHOPIFY_WRITE_ENABLED=true` ni lanza ningún agente |
 | `GET /api/diff` | Informe JSON de diferencias de inventario |
 | `POST /api/aft-import` · `GET /api/aft-import/estado` | Importación AFT en segundo plano y su progreso |
 | `POST /api/sync-run` · `GET /api/sync-run/estado` | Comparación AFT ↔ Shopify (solo lectura, todas las referencias); al terminar, lanza automáticamente la reposición de stock |
@@ -269,6 +270,7 @@ El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline c
 | `POST /api/fichas/:id/aprobar` · `POST /api/fichas/:id/rechazar` | Cambia el estado de un borrador en PostgreSQL — nunca llama a Shopify |
 | `POST /api/fichas/:id/editar` | Edita título/descripción/metadatos de un borrador a mano (JSON body) — solo PostgreSQL |
 | `POST /api/pipeline-run` · `GET /api/pipeline-run/estado` | Pipeline completo y su progreso, etapa a etapa |
+| `GET /api/pipeline-run/historial` (`?limite=N`, por defecto 10) | Últimas N ejecuciones del pipeline, de solo lectura — pensado para confirmar si la programación diaria (`PIPELINE_SCHEDULE_HORA_MADRID`) está corriendo de verdad día a día, sin lanzar un pipeline nuevo solo para comprobarlo |
 | `GET /healthz` | Health check sin autenticación |
 
 ### Límites actuales (honestos, no se ocultan)
