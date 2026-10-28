@@ -10,7 +10,7 @@ const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
-const { ejecutarReposicionStock } = require('./src/reposicion');
+const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
@@ -252,6 +252,31 @@ app.post('/api/reposicion-run', basicAuth, async (req, res) => {
   } catch (e) {
     console.error('[reposicion-run] Error al iniciar la reposición:', e.message);
     if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Prioridad 3: actualización controlada de UNA sola referencia, con
+// autorización específica por petición — nunca activa el lote completo.
+// Requiere { ref, confirmar: true } en el cuerpo JSON; sin SHOPIFY_WRITE_UNA_REF_ENABLED=true
+// (gate propio, independiente de SHOPIFY_WRITE_ENABLED) se queda en dry
+// run igual que el lote. Síncrona (una sola referencia, rápido) — no usa
+// el patrón 202+polling del resto de agentes.
+app.post('/api/reposicion-run/una-referencia', basicAuth, express.json(), async (req, res) => {
+  try {
+    const ref = req.body && req.body.ref;
+    const confirmar = req.body && req.body.confirmar === true;
+    if (!ref || typeof ref !== 'string' || !ref.trim() || !confirmar) {
+      return res.status(400).json({ ok: false, error: 'Requiere { "ref": "REFERENCIA", "confirmar": true } en el cuerpo JSON.' });
+    }
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+    const resultado = await ejecutarReposicionUnaReferencia(ref, req.dashboardUser);
+    res.json({ ok: true, ...resultado });
+  } catch (e) {
+    console.error('[reposicion-run/una-referencia] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
   }
 });
 

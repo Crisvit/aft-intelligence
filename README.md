@@ -133,6 +133,7 @@ La página **Integraciones** del dashboard refleja esta misma tabla en tiempo re
 - Verificación: tras cada escritura real, una **lectura posterior deliberada** (no solo la respuesta de la mutación) confirma que Shopify refleja el valor escrito; si no coincide, queda marcado para revisión manual, nunca se reintenta solo.
 - Programación: se ejecuta automáticamente como parte del pipeline diario (Europe/Madrid, sección 9) y también manualmente desde Integraciones o `POST /api/reposicion-run`.
 - Historial completo (qué se actualizó, se habría actualizado en dry run, o se omitió y por qué) visible en la página Coincidencias del dashboard.
+- **Actualización controlada de una sola referencia** (`POST /api/reposicion-run/una-referencia`, cuerpo `{ "ref": "...", "confirmar": true }`): pensada para validar una escritura real contra producción sin activar el lote completo. Usa un gate propio, `SHOPIFY_WRITE_UNA_REF_ENABLED`, **independiente** de `SHOPIFY_WRITE_ENABLED` — activarlo no hace que el lote diario (botón, `POST /api/reposicion-run`, ni el pipeline programado) empiece a escribir. Reutiliza exactamente la misma función de escritura/verificación y el mismo filtro de fiabilidad que el lote (`reposicion_runs.modo='referencia_unica'`, con `ref_solicitada` e `iniciado_por` guardados para auditoría) — una referencia que no sea candidata fiable no se toca, igual que en el lote.
 
 ## 5. Inteligencia comercial y cálculo de rentabilidad
 
@@ -262,7 +263,8 @@ El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline c
 | `GET /api/diff` | Informe JSON de diferencias de inventario |
 | `POST /api/aft-import` · `GET /api/aft-import/estado` | Importación AFT en segundo plano y su progreso |
 | `POST /api/sync-run` · `GET /api/sync-run/estado` | Comparación AFT ↔ Shopify (solo lectura, todas las referencias); al terminar, lanza automáticamente la reposición de stock |
-| `POST /api/reposicion-run` · `GET /api/reposicion-run/estado` | Reposición automática de stock de forma independiente (sobre el último `shopify_match` ya guardado, sin volver a leer Shopify) y su progreso — único endpoint de todo el repositorio que puede acabar escribiendo en Shopify, y solo si está explícitamente autorizado (ver sección 4) |
+| `POST /api/reposicion-run` · `GET /api/reposicion-run/estado` | Reposición automática de stock de forma independiente (sobre el último `shopify_match` ya guardado, sin volver a leer Shopify) y su progreso — único endpoint del lote completo que puede acabar escribiendo en Shopify, y solo si está explícitamente autorizado (ver sección 4) |
+| `POST /api/reposicion-run/una-referencia` (`{ "ref": "...", "confirmar": true }`) | Actualización controlada de UNA sola referencia, con su propio gate (`SHOPIFY_WRITE_UNA_REF_ENABLED`, independiente del lote) — síncrona, devuelve el resultado directamente |
 | `POST /api/rentabilidad-run` · `GET /api/rentabilidad-run/estado` | Agente de rentabilidad (solo lee hmt-db) y su progreso |
 | `POST /api/oportunidades-run` · `GET /api/oportunidades-run/estado` | Agente 4 — oportunidades comerciales (solo lee hmt-db) y su progreso |
 | `POST /api/demanda-run` · `GET /api/demanda-run/estado` | Agente 5 — demanda y SEO (DataForSEO si está configurado, si no "No conectado") y su progreso |

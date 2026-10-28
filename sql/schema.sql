@@ -337,6 +337,15 @@ CREATE TABLE IF NOT EXISTS reposicion_runs (
   error_message               TEXT
 );
 
+-- Actualización controlada de UNA sola referencia (prioridad 3), separada
+-- a propósito del lote diario completo: su propia variable de entorno
+-- (SHOPIFY_WRITE_UNA_REF_ENABLED, nunca SHOPIFY_WRITE_ENABLED) y su propio
+-- registro de quién la pidió, para quedar auditable como lo que es — una
+-- escritura puntual y autorizada, no parte del lote automático.
+ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS modo TEXT NOT NULL DEFAULT 'lote'; -- 'lote' | 'referencia_unica'
+ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS ref_solicitada TEXT; -- solo cuando modo='referencia_unica'
+ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS iniciado_por TEXT; -- usuario del dashboard que lo lanzó
+
 -- Historial (append-only) de cada candidato evaluado por el agente de
 -- reposición, escrito o no — para que cada actualización (o la decisión de
 -- no actualizar) quede auditable desde el dashboard.

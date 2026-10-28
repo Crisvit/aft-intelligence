@@ -15,6 +15,11 @@ const shopify = require('./shopifyClient');
 const shopifyWrite = require('./shopifyWriteClient');
 
 const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').toLowerCase() === 'true';
+// Gate INDEPENDIENTE para la actualización controlada de una sola
+// referencia (prioridad 3) — activar esta variable nunca activa el lote
+// completo (ni al pulsar "Ejecutar reposición" ni en la ejecución diaria
+// programada del pipeline), que sigue mirando solo SHOPIFY_WRITE_ENABLED.
+const SHOPIFY_WRITE_UNA_REF_ENABLED = String(process.env.SHOPIFY_WRITE_UNA_REF_ENABLED || '').toLowerCase() === 'true';
 const MAIN_LOCATION_ID = process.env.SHOPIFY_MAIN_LOCATION_ID || 'gid://shopify/Location/102229836040';
 
 // Clasificación del cambio — puramente informativa para el historial, no
@@ -58,7 +63,17 @@ async function registrarEvento(runId, f) {
 // sin inventory_item_id real, sin stock de AFT, o con stock de AFT
 // negativo (dato anómalo, no un "AFT confirma 0 unidades" legítimo).
 // ---------------------------------------------------------------------------
-async function obtenerCandidatos() {
+// refFiltro (opcional): restringe el universo a una única referencia AFT,
+// usado por la actualización controlada de una sola referencia. Con el
+// mismo WHERE que el lote completo — una ref que no cumple estos
+// requisitos de fiabilidad nunca es candidata, tampoco a título individual.
+async function obtenerCandidatos(refFiltro) {
+  const params = [];
+  let filtroRef = '';
+  if (refFiltro) {
+    params.push(refFiltro);
+    filtroRef = `AND ref = $${params.length}`;
+  }
   const { rows } = await pool.query(`
     SELECT ref, ean, marca, shopify_variant_id, shopify_inventory_item_id, shopify_stock, stock_aft
     FROM shopify_match
@@ -72,7 +87,8 @@ async function obtenerCandidatos() {
       AND shopify_stock IS NOT NULL
       AND stock_aft IS NOT NULL
       AND stock_aft >= 0
-  `);
+      ${filtroRef}
+  `, params);
   return rows;
 }
 
@@ -90,6 +106,52 @@ async function contarOmitidosPorAmbiguedad() {
       )
   `);
   return rows[0].n;
+}
+
+// ---------------------------------------------------------------------------
+// Procesa UN candidato: decide el tipo de evento, escribe de verdad solo si
+// escrituraRealActiva, y registra el evento. Única implementación de este
+// camino — la usan tanto el lote completo como la actualización controlada
+// de una sola referencia, para que la lógica de escritura/verificación
+// nunca tenga dos copias que puedan divergir entre sí.
+// ---------------------------------------------------------------------------
+async function procesarCandidato(runId, fila, escrituraRealActiva, token) {
+  const antes = Number(fila.shopify_stock);
+  const nuevo = Number(fila.stock_aft);
+  const tipo = clasificarEvento(antes, nuevo);
+  const base = { ref: fila.ref, ean: fila.ean, marca: fila.marca, shopify_variant_id: fila.shopify_variant_id, shopify_inventory_item_id: fila.shopify_inventory_item_id, antes, nuevo, tipo };
+
+  if (tipo === 'sin_cambios') {
+    await registrarEvento(runId, { ...base, dry_run: !escrituraRealActiva, escrito: false, verificado: null, detalle: 'El stock de Shopify ya coincide con el de AFT — sin acción.' });
+    return { tipo, escrito: false, verificado: null, error: false };
+  }
+
+  if (!escrituraRealActiva) {
+    await registrarEvento(runId, {
+      ...base, dry_run: true, escrito: false, verificado: null,
+      detalle: 'DRY RUN: se calculó la actualización pero no se escribió en Shopify (la escritura real no está autorizada para este camino, o falta el scope write_inventory).'
+    });
+    return { tipo, escrito: false, verificado: null, error: false };
+  }
+
+  try {
+    await shopifyWrite.establecerStockDisponible(token, {
+      inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID,
+      cantidad: nuevo, cantidadEsperadaActual: antes, motivo: 'cycle_count_available'
+    });
+    const leido = await shopifyWrite.leerStockDisponible(token, { inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID });
+    const verificado = leido === nuevo;
+    await registrarEvento(runId, {
+      ...base, dry_run: false, escrito: true, verificado,
+      detalle: verificado
+        ? 'Escrito en Shopify y verificado con una lectura posterior.'
+        : `Escrito en Shopify, pero la lectura posterior devolvió ${leido} en vez de ${nuevo} — revisar manualmente.`
+    });
+    return { tipo, escrito: true, verificado, error: false };
+  } catch (e) {
+    await registrarEvento(runId, { ...base, dry_run: false, escrito: false, verificado: null, tipo: 'error', detalle: e.message });
+    return { tipo: 'error', escrito: false, verificado: null, error: true, mensaje: e.message };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,48 +192,16 @@ async function ejecutarReposicionStock(existingRunId) {
     const c = { actualizados: 0, recuperados_stock_cero: 0, reposiciones_detectadas: 0, correcciones_a_la_baja: 0, sin_cambios: 0, errores: 0, verificaciones_fallidas: 0 };
 
     for (const fila of candidatos) {
-      const antes = Number(fila.shopify_stock);
-      const nuevo = Number(fila.stock_aft);
-      const tipo = clasificarEvento(antes, nuevo);
-      const base = { ref: fila.ref, ean: fila.ean, marca: fila.marca, shopify_variant_id: fila.shopify_variant_id, shopify_inventory_item_id: fila.shopify_inventory_item_id, antes, nuevo, tipo };
+      const r = await procesarCandidato(runId, fila, escrituraRealActiva, token);
 
-      if (tipo === 'sin_cambios') {
-        c.sin_cambios++;
-        await registrarEvento(runId, { ...base, dry_run: !escrituraRealActiva, escrito: false, verificado: null, detalle: 'El stock de Shopify ya coincide con el de AFT — sin acción.' });
-        continue;
-      }
-
-      if (!escrituraRealActiva) {
-        await registrarEvento(runId, {
-          ...base, dry_run: true, escrito: false, verificado: null,
-          detalle: 'DRY RUN: se calculó la actualización pero no se escribió en Shopify (SHOPIFY_WRITE_ENABLED no está activo, o falta el scope write_inventory).'
-        });
-      } else {
-        try {
-          await shopifyWrite.establecerStockDisponible(token, {
-            inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID,
-            cantidad: nuevo, cantidadEsperadaActual: antes, motivo: 'cycle_count_available'
-          });
-          const leido = await shopifyWrite.leerStockDisponible(token, { inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID });
-          const verificado = leido === nuevo;
-          if (!verificado) c.verificaciones_fallidas++;
-          await registrarEvento(runId, {
-            ...base, dry_run: false, escrito: true, verificado,
-            detalle: verificado
-              ? 'Escrito en Shopify y verificado con una lectura posterior.'
-              : `Escrito en Shopify, pero la lectura posterior devolvió ${leido} en vez de ${nuevo} — revisar manualmente.`
-          });
-        } catch (e) {
-          c.errores++;
-          await registrarEvento(runId, { ...base, dry_run: false, escrito: false, verificado: null, tipo: 'error', detalle: e.message });
-          continue;
-        }
-      }
+      if (r.tipo === 'sin_cambios') { c.sin_cambios++; continue; }
+      if (r.error) { c.errores++; continue; }
+      if (r.escrito && r.verificado === false) c.verificaciones_fallidas++;
 
       c.actualizados++;
-      if (tipo === 'producto_recuperado_stock_cero_negativo') c.recuperados_stock_cero++;
-      else if (tipo === 'reposicion_detectada') c.reposiciones_detectadas++;
-      else if (tipo === 'correccion_a_la_baja') c.correcciones_a_la_baja++;
+      if (r.tipo === 'producto_recuperado_stock_cero_negativo') c.recuperados_stock_cero++;
+      else if (r.tipo === 'reposicion_detectada') c.reposiciones_detectadas++;
+      else if (r.tipo === 'correccion_a_la_baja') c.correcciones_a_la_baja++;
     }
 
     await pool.query(
@@ -192,4 +222,85 @@ async function ejecutarReposicionStock(existingRunId) {
   }
 }
 
-module.exports = { ejecutarReposicionStock, clasificarEvento };
+// ---------------------------------------------------------------------------
+// Actualización controlada de UNA sola referencia (prioridad 3) — para
+// validar una escritura real contra producción sin activar el lote
+// completo. Usa su propio gate (SHOPIFY_WRITE_UNA_REF_ENABLED), nunca
+// SHOPIFY_WRITE_ENABLED: activarlo no hace que el lote diario (botón,
+// POST /api/reposicion-run, ni el pipeline programado) empiece a escribir.
+// Reutiliza exactamente el mismo filtro de fiabilidad (obtenerCandidatos)
+// y la misma función de escritura/verificación (procesarCandidato) que el
+// lote — una referencia que no sea candidata fiable nunca se toca, igual
+// que en el lote completo.
+// ---------------------------------------------------------------------------
+async function ejecutarReposicionUnaReferencia(ref, iniciadoPor) {
+  if (!ref || typeof ref !== 'string' || !ref.trim()) {
+    throw new Error('Falta ref (referencia AFT) para la actualización controlada de una sola referencia.');
+  }
+  const refLimpia = ref.trim();
+  const dryRunPrevisto = !SHOPIFY_WRITE_UNA_REF_ENABLED;
+
+  const { rows } = await pool.query(
+    `INSERT INTO reposicion_runs (status, fase, dry_run, modo, ref_solicitada, iniciado_por)
+     VALUES ('running','iniciando',$1,'referencia_unica',$2,$3) RETURNING id`,
+    [dryRunPrevisto, refLimpia, iniciadoPor || null]
+  );
+  const runId = rows[0].id;
+
+  try {
+    let token = null;
+    let scopeOk = false;
+    if (SHOPIFY_WRITE_UNA_REF_ENABLED) {
+      token = await shopify.getShopifyToken();
+      scopeOk = await shopifyWrite.tieneScopeEscrituraInventario(token);
+      if (!scopeOk) {
+        console.error('[reposicion] SHOPIFY_WRITE_UNA_REF_ENABLED=true pero la app no tiene concedido el scope write_inventory — se queda en modo simulación (dry run).');
+      }
+    }
+    const escrituraRealActiva = SHOPIFY_WRITE_UNA_REF_ENABLED && scopeOk;
+    await pool.query(`UPDATE reposicion_runs SET dry_run = $2 WHERE id = $1`, [runId, !escrituraRealActiva]);
+
+    const candidatos = await obtenerCandidatos(refLimpia);
+    await pool.query(`UPDATE reposicion_runs SET fase = 'procesando', total_candidatos = $2 WHERE id = $1`, [runId, candidatos.length]);
+
+    if (candidatos.length === 0) {
+      const motivo = `La referencia "${refLimpia}" no es una coincidencia fiable pendiente de actualizar ahora mismo (no existe en la última comparación, el stock ya coincide, o tiene alguna alerta de ambigüedad) — no se ha tocado nada.`;
+      await pool.query(
+        `UPDATE reposicion_runs SET status='success', finished_at=now(), fase='done', error_message=$2 WHERE id=$1`,
+        [runId, motivo]
+      );
+      return { runId, dryRun: !escrituraRealActiva, encontrada: false, ref: refLimpia, motivo };
+    }
+
+    const resultado = await procesarCandidato(runId, candidatos[0], escrituraRealActiva, token);
+    const verificacionFallida = resultado.escrito && resultado.verificado === false;
+
+    await pool.query(
+      `UPDATE reposicion_runs SET status='success', finished_at=now(), fase='done',
+         actualizados=$2, recuperados_stock_cero=$3, reposiciones_detectadas=$4, correcciones_a_la_baja=$5,
+         sin_cambios=$6, errores=$7, verificaciones_fallidas=$8
+       WHERE id=$1`,
+      [runId,
+       (!resultado.error && resultado.tipo !== 'sin_cambios') ? 1 : 0,
+       resultado.tipo === 'producto_recuperado_stock_cero_negativo' ? 1 : 0,
+       resultado.tipo === 'reposicion_detectada' ? 1 : 0,
+       resultado.tipo === 'correccion_a_la_baja' ? 1 : 0,
+       resultado.tipo === 'sin_cambios' ? 1 : 0,
+       resultado.error ? 1 : 0,
+       verificacionFallida ? 1 : 0]
+    );
+
+    return {
+      runId, dryRun: !escrituraRealActiva, encontrada: true, ref: refLimpia,
+      tipo: resultado.tipo, escrito: resultado.escrito, verificado: resultado.verificado, error: resultado.error
+    };
+  } catch (e) {
+    await pool.query(
+      `UPDATE reposicion_runs SET status='error', finished_at=now(), fase='error', error_message=$2 WHERE id=$1`,
+      [runId, e.message]
+    );
+    throw e;
+  }
+}
+
+module.exports = { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, clasificarEvento };
