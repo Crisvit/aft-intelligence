@@ -10,7 +10,7 @@ const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
-const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia } = require('./src/reposicion');
+const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
@@ -280,6 +280,22 @@ app.post('/api/reposicion-run/una-referencia', basicAuth, express.json(), async 
     res.json({ ok: true, ...resultado });
   } catch (e) {
     console.error('[reposicion-run/una-referencia] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Previsualización de reposición — SOLO LECTURA, nunca escribe nada ni
+// lanza ninguna ejecución (ni siquiera en dry run): reutiliza el mismo
+// filtro de fiabilidad que el lote real y la actualización de una sola
+// referencia (obtenerCandidatos(), sin tocarlo), nunca una consulta
+// aparte. No pasa por haySolapamiento() a propósito — es una lectura, no
+// compite por el candado con ningún agente, y no lo necesita.
+app.get('/api/reposicion-run/previsualizacion', basicAuth, async (req, res) => {
+  try {
+    const resultado = await previsualizarReposicion(req.query.limite);
+    res.json({ ok: true, ...resultado });
+  } catch (e) {
+    console.error('[reposicion-run/previsualizacion] Error:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });

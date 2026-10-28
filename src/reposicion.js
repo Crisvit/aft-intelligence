@@ -75,7 +75,9 @@ async function obtenerCandidatos(refFiltro) {
     filtroRef = `AND ref = $${params.length}`;
   }
   const { rows } = await pool.query(`
-    SELECT ref, ean, marca, shopify_variant_id, shopify_inventory_item_id, shopify_stock, stock_aft
+    SELECT ref, ean, marca, shopify_variant_id, shopify_inventory_item_id, shopify_stock, stock_aft,
+           shopify_product_title, matched_by, estado, checked_at,
+           alerta_duplicado, alerta_multiples_ubicaciones, alerta_ubicacion_no_encontrada, bloquear_escritura
     FROM shopify_match
     WHERE estado IN ('cambiaria','a_cero','sin_cambio')
       AND matched_by IN ('ean','sku')
@@ -303,4 +305,76 @@ async function ejecutarReposicionUnaReferencia(ref, iniciadoPor) {
   }
 }
 
-module.exports = { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, clasificarEvento };
+// Mismo umbral que usa el dashboard (buildDashboardHtml.js,
+// HORAS_LIMITE_DESACTUALIZADO) para marcar la última sincronización como
+// desactualizada — duplicado aquí a propósito (nunca se importa HTML desde
+// lógica de negocio) pero debe mantenerse igual en ambos sitios.
+const HORAS_LIMITE_DESACTUALIZADO_PREVIEW = 26;
+
+// ---------------------------------------------------------------------------
+// Previsualización de reposición (prioridad: dashboard, solo lectura) —
+// NUNCA escribe nada ni lanza ninguna ejecución; reutiliza exactamente el
+// mismo filtro de fiabilidad que el lote real y la actualización de una
+// referencia (obtenerCandidatos(), sin tocar su WHERE). Ordena por menor
+// diferencia absoluta de stock y recorta a `limite` (10 por defecto).
+// ---------------------------------------------------------------------------
+async function previsualizarReposicion(limite) {
+  const limiteSeguro = Math.min(Math.max(parseInt(limite, 10) || 10, 1), 50);
+
+  const { rows: sincRows } = await pool.query(
+    `SELECT started_at, finished_at, status FROM sync_runs ORDER BY id DESC LIMIT 1`
+  );
+  const ultimaSync = sincRows[0] || null;
+  const datosDesactualizados = !ultimaSync || !ultimaSync.finished_at ||
+    (Date.now() - new Date(ultimaSync.finished_at).getTime()) > HORAS_LIMITE_DESACTUALIZADO_PREVIEW * 3600000;
+
+  // El mismo universo fiable que usaría una escritura real — nunca una
+  // consulta distinta construida aparte para esta pantalla.
+  const candidatosFiables = await obtenerCandidatos();
+
+  const conDiferencia = candidatosFiables
+    .filter((c) => Number(c.stock_aft) !== Number(c.shopify_stock))
+    .map((c) => {
+      const stockAft = Number(c.stock_aft);
+      const stockShopify = Number(c.shopify_stock);
+      return {
+        ref: c.ref,
+        nombre: c.shopify_product_title || null,
+        ean: c.ean,
+        matchedBy: c.matched_by, // 'ean' | 'sku' — qué identificador se usó para el cruce
+        stockAft,
+        stockShopify,
+        diferencia: stockAft - stockShopify,
+        tipoEvento: clasificarEvento(stockShopify, stockAft),
+        checkedAt: c.checked_at,
+        // Garantizado por el WHERE de obtenerCandidatos(), nunca asumido
+        // aquí: alerta_multiples_ubicaciones y alerta_ubicacion_no_encontrada
+        // se calculan en sync.js comparando contra SHOPIFY_MAIN_LOCATION_ID
+        // — si cualquiera fuera true, esta fila ni siquiera llegaría aquí.
+        ubicacionVerificada: true,
+        alertas: {
+          duplicado: c.alerta_duplicado,
+          multiplesUbicaciones: c.alerta_multiples_ubicaciones,
+          ubicacionNoEncontrada: c.alerta_ubicacion_no_encontrada,
+          bloqueado: c.bloquear_escritura
+        },
+        // El sistema solo lee/escribe el bucket "available" de Shopify —
+        // nunca ha comprobado committed/reserved ni pedidos pendientes.
+        // Nunca "sin riesgo": se declara explícitamente sin verificar.
+        reservasPendientes: 'No verificado'
+      };
+    })
+    .sort((a, b) => Math.abs(a.diferencia) - Math.abs(b.diferencia));
+
+  return {
+    datosDesactualizados,
+    horasLimiteDesactualizado: HORAS_LIMITE_DESACTUALIZADO_PREVIEW,
+    ultimaSync: ultimaSync ? { finishedAt: ultimaSync.finished_at, status: ultimaSync.status } : null,
+    ubicacionConfigurada: MAIN_LOCATION_ID,
+    totalCandidatosFiables: candidatosFiables.length,
+    totalConDiferencia: conDiferencia.length,
+    candidatos: conDiferencia.slice(0, limiteSeguro)
+  };
+}
+
+module.exports = { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, clasificarEvento };
