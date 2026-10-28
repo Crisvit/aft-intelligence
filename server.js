@@ -16,6 +16,7 @@ const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemand
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
+const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
 const app = express();
@@ -165,6 +166,7 @@ app.post('/api/aft-import', basicAuth, async (req, res) => {
           `UPDATE aft_import_runs SET status='error', finished_at=now(), error_message=$2 WHERE id=$1`,
           [runId, e.message]
         );
+        notificarFallo({ agente: 'Importación AFT', mensaje: e.message, runId });
       });
   } catch (e) {
     console.error('[aft-import] Error al iniciar la importación:', e.message);
@@ -213,6 +215,7 @@ app.post('/api/sync-run', basicAuth, async (req, res) => {
       })
       .catch((e) => {
         console.error('[sync-run] Error en la sincronización o la reposición en segundo plano:', e.message);
+        notificarFallo({ agente: 'Sincronización Shopify / Reposición', mensaje: e.message, runId });
       });
   } catch (e) {
     console.error('[sync-run] Error al iniciar la sincronización:', e.message);
@@ -248,6 +251,7 @@ app.post('/api/reposicion-run', basicAuth, async (req, res) => {
 
     ejecutarReposicionStock(runId).catch((e) => {
       console.error('[reposicion-run] Error en la reposición en segundo plano:', e.message);
+      notificarFallo({ agente: 'Reposición automática de stock', mensaje: e.message, runId });
     });
   } catch (e) {
     console.error('[reposicion-run] Error al iniciar la reposición:', e.message);
@@ -310,6 +314,7 @@ app.post('/api/rentabilidad-run', basicAuth, async (req, res) => {
 
     ejecutarAnalisisRentabilidad(runId).catch((e) => {
       console.error('[rentabilidad-run] Error en el análisis en segundo plano:', e.message);
+      notificarFallo({ agente: 'Rentabilidad', mensaje: e.message, runId });
     });
   } catch (e) {
     console.error('[rentabilidad-run] Error al iniciar el análisis:', e.message);
@@ -346,6 +351,7 @@ app.post('/api/oportunidades-run', basicAuth, async (req, res) => {
 
     ejecutarAnalisisOportunidades(runId).catch((e) => {
       console.error('[oportunidades-run] Error en el análisis en segundo plano:', e.message);
+      notificarFallo({ agente: 'Oportunidades comerciales', mensaje: e.message, runId });
     });
   } catch (e) {
     console.error('[oportunidades-run] Error al iniciar el análisis:', e.message);
@@ -383,6 +389,7 @@ app.post('/api/demanda-run', basicAuth, async (req, res) => {
 
     ejecutarAnalisisDemanda(runId).catch((e) => {
       console.error('[demanda-run] Error en el análisis en segundo plano:', e.message);
+      notificarFallo({ agente: 'Demanda y SEO', mensaje: e.message, runId });
     });
   } catch (e) {
     console.error('[demanda-run] Error al iniciar el análisis:', e.message);
@@ -422,6 +429,7 @@ app.post('/api/fichas-run', basicAuth, async (req, res) => {
 
     ejecutarGeneracionFichas(runId).catch((e) => {
       console.error('[fichas-run] Error en la generación en segundo plano:', e.message);
+      notificarFallo({ agente: 'Fichas de producto con IA', mensaje: e.message, runId });
     });
   } catch (e) {
     console.error('[fichas-run] Error al iniciar la generación:', e.message);
@@ -542,6 +550,7 @@ async function lanzarPipelineCompleto() {
       await pool.query(`UPDATE pipeline_runs SET status = 'success', finished_at = now(), etapa = 'done' WHERE id = $1`, [pipelineId]);
     } catch (e) {
       console.error('[pipeline-run] Error en el pipeline en segundo plano:', e.message);
+      notificarFallo({ agente: 'Pipeline completo', mensaje: e.message, runId: pipelineId });
       await pool.query(
         `UPDATE pipeline_runs SET status = 'error', finished_at = now(), error_message = $2 WHERE id = $1`,
         [pipelineId, e.message]
@@ -856,7 +865,9 @@ async function debeEjecutarPipelineHoyEnMadrid(horaObjetivoMin) {
 if (PIPELINE_SCHEDULE_HORA_MADRID) {
   const horaObjetivoMin = parseHoraHHMM(PIPELINE_SCHEDULE_HORA_MADRID);
   if (horaObjetivoMin == null) {
-    console.error(`[pipeline] PIPELINE_SCHEDULE_HORA_MADRID="${PIPELINE_SCHEDULE_HORA_MADRID}" no es una hora válida (formato HH:MM, ej. "10:00") — programación automática DESACTIVADA, revisa la variable de entorno.`);
+    const mensaje = `PIPELINE_SCHEDULE_HORA_MADRID="${PIPELINE_SCHEDULE_HORA_MADRID}" no es una hora válida (formato HH:MM, ej. "10:00") — programación automática DESACTIVADA, revisa la variable de entorno.`;
+    console.error(`[pipeline] ${mensaje}`);
+    notificarFallo({ agente: 'Programación diaria del pipeline', mensaje });
   } else {
     const CHECK_INTERVAL_MS = 15 * 60 * 1000; // suficiente margen para no perderse la ventana de la hora objetivo
     console.log(`[pipeline] Programado automáticamente una vez al día a las ${PIPELINE_SCHEDULE_HORA_MADRID} (Europe/Madrid, DST automático), comprobado cada 15 min.`);
@@ -874,6 +885,7 @@ if (PIPELINE_SCHEDULE_HORA_MADRID) {
         await lanzarPipelineCompleto();
       } catch (e) {
         console.error('[pipeline] Error en la comprobación/ejecución programada:', e.message);
+        notificarFallo({ agente: 'Programación diaria del pipeline', mensaje: e.message });
       }
     }
 

@@ -242,6 +242,10 @@ El `Dockerfile` ejecuta `migrate` automáticamente antes de arrancar el servidor
 
 Ver `.env.example` (plantilla sin valores reales). Se configuran directamente en Easypanel, nunca en el repositorio. Las credenciales de AFT y Shopify se pasan como el cuerpo exacto (JSON) del POST de token de cada API, así el código nunca necesita conocer sus nombres de campo exactos.
 
+### Alertas de fallo
+
+Sin `ALERT_WEBHOOK_URL`, un fallo real de cualquier agente en segundo plano (incluida la ejecución diaria programada) solo queda en los logs del contenedor — nadie se entera hasta que entra al dashboard. Con esa variable definida (`src/alertas.js`), cada fallo real envía un `POST { "text": "..." }` a esa URL — compatible con un webhook entrante de Slack sin configuración adicional. El envío es *best-effort*: si el propio webhook falla, se registra en los logs y nunca hace fallar al agente que lo disparó.
+
 ### Programación diaria automática — cómo activarla y comprobarla en Easypanel
 
 El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline completo" en Integraciones) encadena importación AFT → sincronización Shopify → reposición automática de stock (en dry run salvo autorización expresa, ver sección 4) → rentabilidad → oportunidades comerciales → demanda/SEO → fichas con IA. **Desactivada por defecto** — sin la variable `PIPELINE_SCHEDULE_HORA_MADRID`, desplegar este código no ejecuta nada por sí solo.
@@ -280,7 +284,8 @@ El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline c
 
 ### Límites actuales (honestos, no se ocultan)
 
-- **Reposición automática de stock en modo simulación**: implementada, validada y lista, pero en dry run hasta conceder el scope `write_inventory` y activar `SHOPIFY_WRITE_ENABLED=true` con autorización expresa — nunca se ha escrito en la tienda real.
+- **Reposición automática de stock en modo simulación**: implementada, validada y lista, pero en dry run hasta conceder el scope `write_inventory` y activar `SHOPIFY_WRITE_ENABLED=true` con autorización expresa — nunca se ha escrito en la tienda real. `GET /api/shopify-scopes` permite confirmar el scope concedido en cualquier momento, y `POST /api/reposicion-run/una-referencia` permite validar una escritura real en una sola referencia antes de considerar el lote completo.
+- **Alertas de fallo, opt-in**: sin `ALERT_WEBHOOK_URL`, un fallo real de cualquier agente (incluida la programación diaria) solo queda en los logs del contenedor — nadie se entera hasta que entra al dashboard.
 - **Demanda y SEO sin fuente real conectada**: implementado y validado, pero sin `DATAFORSEO_LOGIN`/`DATAFORSEO_PASSWORD` en producción solo genera candidatos de keyword del catálogo, siempre marcados "sugerida, sin verificar" — nunca un volumen de búsqueda inventado. Además, la integración con DataForSEO se construyó contra su documentación pública pero **todavía no se ha validado contra una cuenta real**; antes de confiar en el volumen/competencia que devuelva en producción, conviene verificar una respuesta real.
 - **Fichas de producto con IA sin proveedor conectado**: implementado y validado, pero sin `ANTHROPIC_API_KEY` en producción genera cero borradores — nunca una plantilla presentada como si fuera una ficha de IA. Incluso con la API conectada, ningún borrador se publica en Shopify automáticamente: la aprobación es siempre manual desde el dashboard.
 - **Pedido agrupado sin tarifa**: hasta que AFT confirme una tabla de tarifas por peso para pedidos agrupados, ese escenario se queda en "Pendiente de cotización" — por diseño, no por una limitación técnica a resolver.
