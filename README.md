@@ -238,6 +238,12 @@ npm start            # levanta el dashboard en $PORT
 
 El `Dockerfile` ejecuta `migrate` automáticamente antes de arrancar el servidor en cada despliegue.
 
+### Tests automatizados y CI
+
+`npm test` (`node --test`, sin dependencias nuevas — usa el runner de tests incorporado en Node ≥18) ejecuta una suite mínima en `test/`: la lógica pura de negocio con más riesgo de regresión silenciosa — clasificación de eventos de reposición, puntuación de oportunidades, coste/margen/IVA/recargo de equivalencia, validación de calidad de fichas, candidatos de demanda, y los reintentos/alertas añadidos en esta fase. No necesita Postgres ni red real (todo lo que toca Shopify/AFT/un webhook está mockeado) — corre en segundos, incluso sin ninguna variable de entorno definida. `.github/workflows/ci.yml` lo ejecuta (junto con `node --check` de sintaxis) en cada push/PR a `main`; no hace ningún despliegue, eso sigue siendo responsabilidad de Easypanel.
+
+Esto cubre la lógica pura — los flujos que sí tocan `hmt-db`, Shopify o AFT (el grueso de cada agente) se siguen validando manualmente contra Postgres local con datos sintéticos, como en el resto de este proyecto (ver la tabla de QA de la sección 6); añadir esos tests de integración a la CI (con un contenedor de Postgres) queda como mejora futura, no incluida en esta entrega.
+
 ### Variables de entorno
 
 Ver `.env.example` (plantilla sin valores reales). Se configuran directamente en Easypanel, nunca en el repositorio. Las credenciales de AFT y Shopify se pasan como el cuerpo exacto (JSON) del POST de token de cada API, así el código nunca necesita conocer sus nombres de campo exactos.
@@ -286,6 +292,7 @@ El pipeline completo (`POST /api/pipeline-run`, o el botón "Ejecutar pipeline c
 
 - **Reposición automática de stock en modo simulación**: implementada, validada y lista, pero en dry run hasta conceder el scope `write_inventory` y activar `SHOPIFY_WRITE_ENABLED=true` con autorización expresa — nunca se ha escrito en la tienda real. `GET /api/shopify-scopes` permite confirmar el scope concedido en cualquier momento, y `POST /api/reposicion-run/una-referencia` permite validar una escritura real en una sola referencia antes de considerar el lote completo.
 - **Alertas de fallo, opt-in**: sin `ALERT_WEBHOOK_URL`, un fallo real de cualquier agente (incluida la programación diaria) solo queda en los logs del contenedor — nadie se entera hasta que entra al dashboard.
+- **CI sin cobertura de integración todavía**: `npm test`/GitHub Actions cubren la lógica pura de negocio, no los flujos que tocan `hmt-db`, Shopify o AFT de verdad — esos se siguen validando a mano contra Postgres local en cada entrega, como hasta ahora.
 - **Demanda y SEO sin fuente real conectada**: implementado y validado, pero sin `DATAFORSEO_LOGIN`/`DATAFORSEO_PASSWORD` en producción solo genera candidatos de keyword del catálogo, siempre marcados "sugerida, sin verificar" — nunca un volumen de búsqueda inventado. Además, la integración con DataForSEO se construyó contra su documentación pública pero **todavía no se ha validado contra una cuenta real**; antes de confiar en el volumen/competencia que devuelva en producción, conviene verificar una respuesta real.
 - **Fichas de producto con IA sin proveedor conectado**: implementado y validado, pero sin `ANTHROPIC_API_KEY` en producción genera cero borradores — nunca una plantilla presentada como si fuera una ficha de IA. Incluso con la API conectada, ningún borrador se publica en Shopify automáticamente: la aprobación es siempre manual desde el dashboard.
 - **Pedido agrupado sin tarifa**: hasta que AFT confirme una tabla de tarifas por peso para pedidos agrupados, ese escenario se queda en "Pendiente de cotización" — por diseño, no por una limitación técnica a resolver.
