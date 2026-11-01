@@ -289,32 +289,92 @@ const previsualizacionHtml =
   '<div id="previsualizacionContenedor" style="margin-top:14px;"></div>';
 
 // --- Página Oportunidades: datos reales, sin ningún score inventado.
-//     Ranking explicable: prioridad de marca (Wolfpack/Samurai/Maurer/
-//     Papillon/Saturnia, configurable) primero, margen real/proyectado
-//     después — nunca una puntuación opaca. ---
-const marcasOportunidad = Array.from(new Set(oportunidadRows.map(c => titleCase(c.marca || '')).filter(Boolean))).sort();
+//     Score v3 (ver src/scoreV3.js): 5 componentes explicables, con
+//     «Sin datos» — nunca un valor neutro inventado — cuando falta un dato
+//     real (demanda/competitividad, hoy sin fuente conectada). El filtro de
+//     candidatos (src/candidatos.js) no elimina ninguna referencia: marca
+//     es_candidato y, para las descartadas, guarda el motivo exacto. Por
+//     defecto el panel solo muestra candidatas, ordenadas por Score v3; el
+//     resto queda a un clic con su motivo de descarte visible. ---
+const ETIQUETA_COLOR_V3 = { 'Excelente': '#059669', 'Interesante': '#2563EB', 'Analizar': '#D97706', 'Baja prioridad': '#6B7280', 'Sin datos': '#6B7280' };
+const NOMBRE_COMPONENTE_V3 = { rentabilidad: 'Rentabilidad', demanda: 'Demanda', competitividad: 'Competitividad', stock: 'Stock', afinidad: 'Afinidad comercial' };
+const ORDEN_COMPONENTES_V3 = ['rentabilidad', 'demanda', 'competitividad', 'stock', 'afinidad'];
+
+// Candidatas primero (ordenadas por Score v3 desc, «Sin datos» al final);
+// descartadas después, en el mismo orden — quedan ocultas por el filtro
+// «Solo candidatas» pero disponibles con un clic, nunca eliminadas.
+const oportunidadRowsOrdenadas = [...oportunidadRows].sort((a, b) => {
+  if (!!a.es_candidato !== !!b.es_candidato) return a.es_candidato ? -1 : 1;
+  const sa = a.score_v3 != null ? Number(a.score_v3) : -1;
+  const sb = b.score_v3 != null ? Number(b.score_v3) : -1;
+  if (sa !== sb) return sb - sa;
+  return String(a.ref).localeCompare(String(b.ref));
+});
+const marcasOportunidad = Array.from(new Set(oportunidadRowsOrdenadas.map(c => titleCase(c.marca || '')).filter(Boolean))).sort();
+
+function scoreV3Celda(c) {
+  if (c.score_v3 == null) return '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">Sin datos</span>';
+  const color = ETIQUETA_COLOR_V3[c.score_v3_etiqueta] || '#6B7280';
+  return '<div style="font-weight:700;">' + Number(c.score_v3).toFixed(1) + '/100</div>' +
+    '<div style="font-size:10.5px;font-weight:600;color:' + color + ';">' + esc(c.score_v3_etiqueta || '') + '</div>';
+}
+function coberturaCelda(c) {
+  return c.score_v3_cobertura != null ? Math.round(Number(c.score_v3_cobertura) * 100) + '%' : '—';
+}
+function candidataCelda(c) {
+  if (c.es_candidato) return '<span class="badge badge-ok">Candidata' + (c.ranking_categoria ? ' · #' + esc(String(c.ranking_categoria)) + ' cat.' : '') + '</span>';
+  return '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Descartada</span>';
+}
+function componenteV3Html(nombre, comp) {
+  if (!comp) return '';
+  const valor = comp.puntos != null
+    ? '<strong>' + comp.puntos + '/' + comp.max + ' pts</strong>'
+    : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">Sin datos</span>';
+  return '<div class="score-componente"><div class="score-componente-cab"><span>' + esc(nombre) + '</span><span>' + valor + '</span></div>' +
+    '<div class="score-componente-exp">' + esc(comp.explicacion || '') + '</div>' +
+    '<div class="score-componente-fuente">Fuente: ' + esc(comp.fuente || 'sin especificar') + '</div></div>';
+}
+function desgloseV3Html(c) {
+  const d = c.score_v3_detalle;
+  if (!d || !d.componentes) return '<div class="table-note" style="margin:6px 0 0;">Sin desglose de Score v3 disponible para esta referencia.</div>';
+  const pendientes = ORDEN_COMPONENTES_V3.filter((k) => d.componentes[k] && d.componentes[k].puntos == null).map((k) => NOMBRE_COMPONENTE_V3[k]);
+  return '<div class="score-resumen">' + esc(d.resumen || '') + '</div>' +
+    (pendientes.length ? '<div class="score-pendientes">Datos pendientes (no puntúan, nunca se inventan): ' + esc(pendientes.join(', ')) + '</div>' : '') +
+    '<div class="score-grid">' + ORDEN_COMPONENTES_V3.map((k) => componenteV3Html(NOMBRE_COMPONENTE_V3[k], d.componentes[k])).join('') + '</div>';
+}
 function filaOportunidad(c){
   const margen = c.margenPct != null ? Number(c.margenPct) : null;
-  return '<tr data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '">' +
+  const esCandidato = !!c.es_candidato;
+  const atributos = 'data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '" data-candidata="' + (esCandidato ? '1' : '0') + '"';
+  return '<tr ' + atributos + '>' +
     '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(c.descripcion || c.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(c.ref) + (c.categoria_nombre ? ' · ' + esc(titleCase(c.categoria_nombre)) : '') + '</div></td>' +
     '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + (c.esPrioritaria ? ' <span class="badge badge-ok">Prioritaria</span>' : '') + (c.esComplementaria ? ' <span class="badge badge-off" style="background:#F5F3FF;color:#7C3AED;">Complementaria</span>' : '') + '</td>' +
+    '<td data-label="Candidata">' + candidataCelda(c) + '</td>' +
     '<td class="num" data-label="Stock AFT">' + num(c.stock) + '</td>' +
     '<td class="num" data-label="Coste">' + eur(c.coste) + '</td>' +
     '<td class="num" data-label="PVP recomendado">' + eur(c.precio) + '</td>' +
     '<td class="num ok" data-label="Margen">' + (margen != null ? pct(margen) : '—') + '</td>' +
-    '<td class="num" data-label="Score">' + (c.score != null ? Number(c.score).toFixed(0) + '/100' : '—') + '</td>' +
+    '<td class="num" data-label="Score v3">' + scoreV3Celda(c) + '</td>' +
+    '<td class="num" data-label="Cobertura">' + coberturaCelda(c) + '</td>' +
     '<td data-label="Enlaces">' + copiarReferenciaBtn(c.ref) + '</td>' +
     '</tr>' +
-    '<tr class="row-detalle" data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '"><td colspan="8" style="font-size:11px;color:var(--sub);padding-top:0;padding-bottom:10px;">' + esc(c.motivo || '') + '</td></tr>';
+    '<tr class="row-detalle" ' + atributos + '><td colspan="10" style="padding-top:0;padding-bottom:10px;">' +
+      (!esCandidato ? '<div class="score-descarte">Descartada: ' + esc(c.motivo_descarte || 'motivo no disponible') + '</div>' : '') +
+      '<details class="score-detalle"><summary>Ver desglose del Score v3 (5 componentes)</summary>' + desgloseV3Html(c) + '</details>' +
+      (c.motivo ? '<div class="score-legacy">Sistema de puntuación anterior (informativo, sin cambios): ' + esc(c.motivo) + '</div>' : '') +
+    '</td></tr>';
 }
-const oportunidadesHtml = oportunidadRows.length
+const candidatasCount = oportunidadRowsOrdenadas.filter((c) => c.es_candidato).length;
+const descartadasCount = oportunidadRowsOrdenadas.length - candidatasCount;
+const oportunidadesHtml = oportunidadRowsOrdenadas.length
   ? '<div class="filterbar">' +
+      '<label class="filter-checkbox"><input type="checkbox" id="filtroSoloCandidatas" checked onchange="filtrarOportunidades()"/> Solo candidatas</label>' +
       '<select id="filtroMarca" class="filter-select" onchange="filtrarOportunidades()"><option value="">Todas las marcas</option>' + marcasOportunidad.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select>' +
       '<select id="filtroMargen" class="filter-select" onchange="filtrarOportunidades()"><option value="0">Cualquier margen</option><option value="20">20%+</option><option value="30">30%+</option><option value="40">40%+</option></select>' +
     '</div>' +
-    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' del último análisis del Agente 4' + (ultimaOportunidades ? ' (' + tiempoRelativo(ultimaOportunidades.finished_at) + ')' : '') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Puntuación explicable (ver motivo bajo cada fila): marca prioritaria + margen proyectado + stock — nunca una señal de demanda externa inventada.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Score</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
-    oportunidadRows.map(filaOportunidad).join('') +
+    '<div class="table-note">Mostrando ' + pl(candidatasCount, 'candidata', 'candidatas') + ' de ' + pl(oportunidadRowsOrdenadas.length, 'oportunidad analizada', 'oportunidades analizadas') + ' (' + descartadasCount + ' descartadas, visibles al desmarcar «Solo candidatas», cada una con su motivo) del último análisis del Agente 4' + (ultimaOportunidades ? ' (' + tiempoRelativo(ultimaOportunidades.finished_at) + ')' : '') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Ordenadas por Score v3 (5 componentes explicables: rentabilidad, demanda, competitividad, stock, afinidad — «Sin datos» cuando falta un dato real, nunca un valor inventado).</div>' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Candidata</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Score v3</th><th>Cobertura</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
+    oportunidadRowsOrdenadas.map(filaOportunidad).join('') +
     '</tbody></table></div>'
   : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
 
@@ -742,15 +802,31 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '.badge-ok{background:#ECFDF5;color:#059669;}' +
 '.badge-off{background:#F3F4F6;color:var(--sub);}' +
 '.btn-sm{padding:5px 10px;font-size:11.5px;margin-top:0;}' +
-'.filterbar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;}' +
+'.filterbar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}' +
 '.filter-select{font-size:12.5px;font-weight:500;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--ink);}' +
+'.filter-checkbox{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;color:var(--ink);padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;}' +
+'.filter-checkbox input{margin:0;cursor:pointer;}' +
+'.score-descarte{font-size:11.5px;color:#DC2626;font-weight:600;margin-bottom:8px;}' +
+'.score-legacy{font-size:10.5px;color:var(--sub);margin-top:10px;}' +
+'details.score-detalle{margin-top:2px;}' +
+'details.score-detalle summary{cursor:pointer;font-size:11.5px;font-weight:600;color:#2563EB;list-style:none;}' +
+'details.score-detalle summary::-webkit-details-marker{display:none;}' +
+'details.score-detalle summary::before{content:"▸ ";}' +
+'details.score-detalle[open] summary::before{content:"▾ ";}' +
+'.score-resumen{font-size:11.5px;color:var(--ink);font-weight:600;margin:8px 0 4px;}' +
+'.score-pendientes{font-size:11px;color:#B45309;margin-bottom:8px;}' +
+'.score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:4px;}' +
+'.score-componente{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:#fff;}' +
+'.score-componente-cab{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;margin-bottom:4px;}' +
+'.score-componente-exp{font-size:11px;color:var(--sub);line-height:1.4;}' +
+'.score-componente-fuente{font-size:10px;color:#9CA3AF;margin-top:4px;}' +
 '.stale-banner{display:flex;align-items:center;gap:10px;background:#FFFBEB;border:1px solid #FDE68A;color:#92400E;padding:12px 16px;border-radius:10px;font-size:13px;font-weight:500;margin-bottom:24px;}' +
 '.pagetitle{font-size:20px;font-weight:800;margin-bottom:20px;letter-spacing:-0.02em;}' +
 '.spinner{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.4);border-top-color:#fff;border-radius:50%;animation:spin 0.6s linear infinite;margin-right:6px;vertical-align:-2px;}' +
 '.spinner.dark{border:2px solid rgba(0,0,0,0.15);border-top-color:var(--ink);}' +
 '@keyframes spin{to{transform:rotate(360deg);}}' +
 '.hamburger{display:none;margin-left:auto;background:none;border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:16px;cursor:pointer;color:var(--ink);}' +
-'@media(max-width:700px){table thead{display:none;}table,table tbody,table tr,table td{display:block;width:100%;}table tr{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;padding:4px 0;background:#fff;}table td{border-bottom:none;padding:6px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:right;}table td.num{text-align:right;}table td::before{content:attr(data-label);font-size:11px;color:var(--sub);font-weight:600;text-align:left;}table td:empty{display:none;}.table-scroll{overflow-x:visible;}}' +
+'@media(max-width:700px){table thead{display:none;}table,table tbody,table tr,table td{display:block;width:100%;}table tr{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;padding:4px 0;background:#fff;}table td{border-bottom:none;padding:6px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:right;}table td.num{text-align:right;}table td::before{content:attr(data-label);font-size:11px;color:var(--sub);font-weight:600;text-align:left;}table td:empty{display:none;}.table-scroll{overflow-x:visible;}tr.row-detalle td{display:block;text-align:left;}.score-grid{grid-template-columns:1fr;}}' +
 '@media(max-width:900px){.kpi-row{grid-template-columns:repeat(2,1fr);}.attn-grid{grid-template-columns:1fr;}.bottom-grid{grid-template-columns:1fr;}body{flex-direction:column;}.sidebar{width:100%;min-height:auto;position:relative;}.sb-logo{padding-right:16px;}.hamburger{display:block;}.sb-nav{display:none;margin-top:10px;}.sb-nav.open{display:block;}main{padding:20px;}}' +
 '@media(max-width:480px){.header{flex-direction:column;align-items:stretch;margin-bottom:18px;gap:8px;}.header h1{font-size:19px;}.header .sub{font-size:13px;}.header-right{justify-content:flex-end;gap:10px;margin-top:2px;flex-wrap:wrap;}.updated{font-size:11px;}.sb-logo{padding:0 16px 4px;}.sb-foot{display:none;}.sidebar{padding:12px 0;}main{padding:14px;}.kpi-row{gap:10px;margin-bottom:22px;}.kpi{padding:12px 14px;}.kpi-icon{width:26px;height:26px;margin-bottom:7px;}.kpi-n{font-size:21px;}.kpi-l{font-size:11px;}}' +
 '</style></head><body>' +
@@ -810,7 +886,12 @@ fichasHtml +
 'function copiarReferencia(btn,ref){var original=btn.innerHTML;function ok(){btn.innerHTML="Copiado ✓";setTimeout(function(){btn.innerHTML=original;},1500);}function fallback(){try{var ta=document.createElement("textarea");ta.value=ref;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.focus();ta.select();document.execCommand("copy");document.body.removeChild(ta);ok();}catch(e){btn.innerHTML="Ref: "+ref;}}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ref).then(ok).catch(fallback);}else{fallback();}}' +
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
-'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;r.style.display=(okMarca&&okMargen)?"":"none";});}' +
+'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;var soloCandEl=document.getElementById("filtroSoloCandidatas");var soloCand=!soloCandEl||soloCandEl.checked;document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;var okCand=!soloCand||r.dataset.candidata==="1";r.style.display=(okMarca&&okMargen&&okCand)?"":"none";});}' +
+// El checkbox «Solo candidatas» se renderiza marcado por defecto, pero sin
+// esta llamada inicial la tabla mostraría TODAS las filas hasta que alguien
+// tocara el filtro — aplicarlo una vez al cargar la página es lo que hace
+// que «por defecto» sea real, no solo la apariencia del checkbox.
+'if(document.getElementById("filtroSoloCandidatas"))filtrarOportunidades();' +
 'function filtrarProductos(){var q=document.getElementById("buscarProducto").value.toLowerCase();var proveedor=document.getElementById("filtroProveedorProducto").value;var vendor=document.getElementById("filtroVendorProducto").value;var estado=document.getElementById("filtroEstadoProducto").value;var disponibilidad=document.getElementById("filtroDisponibilidadProducto").value;var visibles=0;document.querySelectorAll("#tablaProductosBody tr").forEach(function(r){if(!r.dataset.nombre)return;var okTexto=r.dataset.nombre.indexOf(q)>-1;var okProveedor=!proveedor||r.dataset.proveedor===proveedor;var okVendor=!vendor||r.dataset.vendor===vendor;var okEstado=!estado||r.dataset.estado===estado;var okDisponibilidad=!disponibilidad||r.dataset.disponibilidad===disponibilidad;var match=okTexto&&okProveedor&&okVendor&&okEstado&&okDisponibilidad;r.style.display=match?"":"none";if(match)visibles++;});var total=document.querySelectorAll("#tablaProductosBody tr[data-nombre]").length;var c=document.getElementById("contadorProductos");if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" variante.":" variantes.");}' +
 'var aftPollTimer=null;' +
 'function pararPollAFT(){if(aftPollTimer){clearInterval(aftPollTimer);aftPollTimer=null;}}' +
