@@ -741,7 +741,10 @@ async function renderDashboard() {
     `SELECT ref, ean, marca, descripcion, categoria_nombre, stock_aft AS stock, coste,
             portes_proveedor_aft, pvp_recomendado AS precio, margen_pct AS "margenPct",
             es_marca_prioritaria AS "esPrioritaria", es_candidato_complementario AS "esComplementaria",
-            score, motivo
+            score, motivo,
+            afinidad_clase AS "afinidadClase", afinidad_motivo AS "afinidadMotivo",
+            margen_clasificacion AS "margenClasificacion", margen_prioridad_adicional AS "margenPrioridadAdicional",
+            estado_elegibilidad AS "estadoElegibilidad"
      FROM oportunidades_resultados
      ORDER BY score DESC NULLS LAST, margen_pct DESC NULLS LAST
      LIMIT 500`
