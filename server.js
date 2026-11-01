@@ -754,12 +754,22 @@ app.get('/api/diff', basicAuth, async (req, res) => {
   });
 });
 
-let cache = { html: null, builtAt: 0 };
+// Fase 3 — IMPORTANTE: esta caché guarda los DATOS crudos (consultas a
+// hmt-db), nunca el HTML ya construido. El HTML depende del usuario que
+// lo pide (la página Aprobaciones oculta sus acciones según el rol de
+// req.dashboardRoles) — si se cacheara el HTML entero, la primera
+// petición "congelaría" su propio juego de botones durante 30s para
+// CUALQUIER otro usuario que cargue el dashboard en esa ventana,
+// filtrando acciones de un usuario con permisos a uno sin ellos (o al
+// revés). Los datos sí son iguales para todos, así que solo esos se
+// cachean; construir el HTML a partir de ellos es barato (sin I/O) y se
+// hace en cada petición, en app.get('/').
+let cache = { datos: null, builtAt: 0 };
 const CACHE_MS = 30 * 1000;
 
-async function renderDashboard() {
+async function obtenerDatosDashboard() {
   const now = Date.now();
-  if (cache.html && (now - cache.builtAt) < CACHE_MS) return cache.html;
+  if (cache.datos && (now - cache.builtAt) < CACHE_MS) return cache.datos;
 
   const { rows: ultimoSyncRows } = await pool.query(`SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1`);
   const ultimoSync = ultimoSyncRows[0] || null;
@@ -969,7 +979,7 @@ async function renderDashboard() {
     console.error('[dashboard] No se pudieron cargar los datos de Aprobaciones:', e.message);
   }
 
-  const html = buildDashboardHtml({
+  const datos = {
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
     pvpComplementoMax: PVP_COMPLEMENTO_MAX,
@@ -984,15 +994,23 @@ async function renderDashboard() {
     iaConectada: hayProveedorIaConfigurado(),
     graficosData,
     aprobacionesData
-  });
+  };
 
-  cache = { html, builtAt: now };
-  return html;
+  cache = { datos, builtAt: now };
+  return datos;
 }
 
 app.get('/', basicAuth, async (req, res) => {
   try {
-    const html = await renderDashboard();
+    const datos = await obtenerDatosDashboard();
+    // aprobacionesData.roles se añade aquí, FUERA de la caché compartida
+    // — son los roles del usuario que hace ESTA petición concreta
+    // (req.dashboardRoles, fijados por basicAuth), nunca los de quien
+    // disparó la última reconstrucción de la caché de datos.
+    const html = buildDashboardHtml({
+      ...datos,
+      aprobacionesData: datos.aprobacionesData ? { ...datos.aprobacionesData, roles: req.dashboardRoles || [] } : null
+    });
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (err) {

@@ -17,7 +17,14 @@ function selectClases(idPrefix) {
     '</select>';
 }
 
-function filaIncidenciaCategoria(grupo) {
+// puedeAfinidad: si el usuario que ve la página NO tiene el rol
+// aprobar_afinidad, el formulario de resolución ni siquiera se envía al
+// HTML (no es solo ocultarlo con CSS) — se sustituye por una nota de
+// solo lectura. El backend ya rechazaba esto con 403 (requireRole), esto
+// es defensa en profundidad en la UI, nunca el único control: el
+// endpoint sigue validando el rol en cada petición, exactamente igual
+// que si este botón nunca hubiera dejado de mostrarse.
+function filaIncidenciaCategoria(grupo, puedeAfinidad) {
   const idSeguro = 'cat-' + Buffer.from(grupo.categoria_normalizada).toString('base64').replace(/[^a-zA-Z0-9]/g, '');
   const categoriaTexto = grupo.categoria_original || grupo.categoria_normalizada;
   // La categoría viaja en un atributo data-* (siempre HTML-escapado por
@@ -25,16 +32,19 @@ function filaIncidenciaCategoria(grupo) {
   // problema de comillas con texto real de AFT (acentos, comillas,
   // apóstrofes) — el handler la lee de el.dataset, nunca la reconstruye
   // como código JS.
+  const acciones = puedeAfinidad
+    ? selectClases(idSeguro) +
+      '<input type="text" id="' + idSeguro + '-motivo" class="filter-select" placeholder="Motivo de la resolución" style="width:220px;"/>' +
+      '<button class="btn-sm btn-solid" data-categoria="' + esc(categoriaTexto) + '" onclick="hmtResolverAfinidad(\'' + idSeguro + '\', this)">Guardar resolución</button>' +
+      '<span id="' + idSeguro + '-resultado" class="integ-sub"></span>'
+    : '<span class="badge badge-off" title="Tu usuario no tiene el permiso aprobar_afinidad">Solo lectura</span>';
   return '<div class="panel-card" style="padding:14px 18px;margin-bottom:10px;" id="' + idSeguro + '">' +
     '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">' +
       '<div style="flex:1;min-width:220px;">' +
         '<div style="font-weight:600;font-size:13px;">' + esc(categoriaTexto) + '</div>' +
         '<div style="font-size:11.5px;color:var(--sub);margin-top:2px;">' + grupo.total_refs + ' ' + (grupo.total_refs === 1 ? 'referencia afectada' : 'referencias afectadas') + ' · detectada ' + esc(tiempoRelativo(grupo.detectado_en)) + '</div>' +
       '</div>' +
-      selectClases(idSeguro) +
-      '<input type="text" id="' + idSeguro + '-motivo" class="filter-select" placeholder="Motivo de la resolución" style="width:220px;"/>' +
-      '<button class="btn-sm btn-solid" data-categoria="' + esc(categoriaTexto) + '" onclick="hmtResolverAfinidad(\'' + idSeguro + '\', this)">Guardar resolución</button>' +
-      '<span id="' + idSeguro + '-resultado" class="integ-sub"></span>' +
+      acciones +
     '</div>' +
   '</div>';
 }
@@ -48,17 +58,20 @@ function filaHistorialAfinidad(h) {
     '<div class="tl-time">por ' + esc(h.resuelto_por) + ' · ' + esc(tiempoRelativo(h.resuelto_en)) + (h.revocado_por ? ' · revocada por ' + esc(h.revocado_por) + ' ' + esc(tiempoRelativo(h.revocado_en)) : '') + '</div></div></div>';
 }
 
-function filaMargenPendiente(c) {
+function filaMargenPendiente(c, puedeMargen) {
+  const acciones = puedeMargen
+    ? '<input type="text" id="margen-' + esc(c.ref) + '-motivo" class="filter-select" placeholder="Motivo" style="width:220px;"/>' +
+      '<button class="btn-sm btn-outline" data-ref="' + esc(c.ref) + '" data-margen="' + (c.margen_pct != null ? Number(c.margen_pct) : '') + '" onclick="hmtDecidirMargen(this,\'rechazar\')">Rechazar</button>' +
+      '<button class="btn-sm btn-solid" data-ref="' + esc(c.ref) + '" data-margen="' + (c.margen_pct != null ? Number(c.margen_pct) : '') + '" onclick="hmtDecidirMargen(this,\'autorizar\')">Autorizar excepción</button>' +
+      '<span id="margen-' + esc(c.ref) + '-resultado" class="integ-sub"></span>'
+    : '<span class="badge badge-off" title="Tu usuario no tiene el permiso aprobar_margen">Solo lectura</span>';
   return '<div class="panel-card" style="padding:14px 18px;margin-bottom:10px;" id="margen-' + esc(c.ref) + '">' +
     '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">' +
       '<div style="flex:1;min-width:220px;">' +
         '<div style="font-weight:600;font-size:13px;">' + esc(titleCase(c.descripcion || c.ref)) + '</div>' +
         '<div style="font-size:11.5px;color:var(--sub);margin-top:2px;">Margen proyectado: <strong style="color:#DC2626;">' + (c.margen_pct != null ? Number(c.margen_pct).toFixed(1) + '%' : '—') + '</strong> · ref ' + esc(c.ref) + (c.marca ? ' · ' + esc(titleCase(c.marca)) : '') + '</div>' +
       '</div>' +
-      '<input type="text" id="margen-' + esc(c.ref) + '-motivo" class="filter-select" placeholder="Motivo" style="width:220px;"/>' +
-      '<button class="btn-sm btn-outline" data-ref="' + esc(c.ref) + '" data-margen="' + (c.margen_pct != null ? Number(c.margen_pct) : '') + '" onclick="hmtDecidirMargen(this,\'rechazar\')">Rechazar</button>' +
-      '<button class="btn-sm btn-solid" data-ref="' + esc(c.ref) + '" data-margen="' + (c.margen_pct != null ? Number(c.margen_pct) : '') + '" onclick="hmtDecidirMargen(this,\'autorizar\')">Autorizar excepción</button>' +
-      '<span id="margen-' + esc(c.ref) + '-resultado" class="integ-sub"></span>' +
+      acciones +
     '</div>' +
     '<div style="font-size:10.5px;color:#9CA3AF;margin-top:8px;">Autorización comercial — no crea ninguna ficha de producto ni publica nada en Shopify.</div>' +
   '</div>';
@@ -78,6 +91,23 @@ function renderAprobacionesSection(data) {
   const autorizacionesPendientes = data.autorizacionesPendientes || [];
   const historialAfinidad = data.historialAfinidad || [];
   const historialMargen = data.historialMargen || [];
+  // roles: los del usuario autenticado que está viendo la página AHORA
+  // (req.dashboardRoles, fijados por basicAuth en server.js) — nunca los
+  // de quien resolvió algo en el pasado. Sin roles asignados (array
+  // vacío o ausente), nunca se asume permiso: se ve todo en solo lectura.
+  const roles = data.roles || [];
+  const puedeAfinidad = roles.includes('aprobar_afinidad');
+  const puedeMargen = roles.includes('aprobar_margen');
+
+  const avisoSoloLectura = (!puedeAfinidad || !puedeMargen)
+    ? '<div class="stale-banner" style="background:#EFF6FF;border-color:#BFDBFE;color:#1D4ED8;">' +
+        (!puedeAfinidad && !puedeMargen
+          ? 'Tu usuario no tiene permiso para aprobar nada aquí — puedes ver todo, pero resolver afinidad y autorizar márgenes están deshabilitados.'
+          : !puedeAfinidad
+            ? 'Tu usuario no tiene el permiso "aprobar_afinidad" — la resolución de incidencias de afinidad está en solo lectura.'
+            : 'Tu usuario no tiene el permiso "aprobar_margen" — las excepciones de margen están en solo lectura.') +
+      '</div>'
+    : '';
 
   const seccionAfinidad =
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
@@ -86,7 +116,7 @@ function renderAprobacionesSection(data) {
     '</div>' +
     '<div style="font-size:12px;color:var(--sub);margin-bottom:12px;">Categorías de AFT que no coinciden con ninguna lista configurada. Resolver aquí se aplica a TODAS las referencias de esa categoría — ya y en el futuro — mientras la resolución esté vigente; nunca activa por sí solo ningún filtro comercial todavía en modo observación.</div>' +
     (incidenciasAgrupadas.length
-      ? incidenciasAgrupadas.map(filaIncidenciaCategoria).join('')
+      ? incidenciasAgrupadas.map((g) => filaIncidenciaCategoria(g, puedeAfinidad)).join('')
       : '<div class="empty-state">No hay categorías de afinidad ambigua pendientes de resolver.</div>') +
     (historialAfinidad.length
       ? '<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:12px;color:var(--brand-dark);font-weight:600;">Historial de resolución (' + historialAfinidad.length + ')</summary><div class="panel-card" style="margin-top:8px;">' + historialAfinidad.map(filaHistorialAfinidad).join('') + '</div></details>'
@@ -99,7 +129,7 @@ function renderAprobacionesSection(data) {
     '</div>' +
     '<div style="font-size:12px;color:var(--sub);margin-bottom:12px;">Autorización comercial independiente — nunca comparte tabla ni campo con la resolución de incidencias de afinidad.</div>' +
     (autorizacionesPendientes.length
-      ? autorizacionesPendientes.map(filaMargenPendiente).join('')
+      ? autorizacionesPendientes.map((c) => filaMargenPendiente(c, puedeMargen)).join('')
       : '<div class="empty-state">No hay productos con margen por debajo del 10% pendientes de autorización.</div>') +
     (historialMargen.length
       ? '<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:12px;color:var(--brand-dark);font-weight:600;">Historial de decisiones (' + historialMargen.length + ')</summary><div class="panel-card" style="margin-top:8px;">' + historialMargen.map(filaHistorialMargen).join('') + '</div></details>'
@@ -130,7 +160,7 @@ function renderAprobacionesSection(data) {
       '</div>' +
     '</div>';
 
-  const html = seccionAfinidad + seccionMargen + seccionPreautorizacion;
+  const html = avisoSoloLectura + seccionAfinidad + seccionMargen + seccionPreautorizacion;
 
   const script =
     'function hmtResultado(id,ok,msg){var el=document.getElementById(id+"-resultado");if(!el)return;el.textContent=msg;el.style.color=ok?"#059669":"#DC2626";}\n' +
