@@ -1,6 +1,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros } = require('../src/historialCambios');
+const {
+  detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros,
+  pctVariacion, esAlertaSubidaCoste, filtrarAlertasSubidaCoste, listarAlertasSubidaCoste,
+  fechaCorteRetencion, contarPendientesDeRetencion, UMBRAL_ALERTA_COSTE_PCT, RETENCION_MESES
+} = require('../src/historialCambios');
 
 const previos = (obj) => new Map(Object.entries(obj));
 const nueva = (o) => ({ ref: 'A', costo: 10, pvp_sin_iva: 20, stock: 5, fecha_cambio_aft: null, ...o });
@@ -119,4 +123,107 @@ test('consultarHistorial: un campo inválido falla con status 400 sin consultar 
   const pool = { query: async () => { consultas++; return { rows: [] }; } };
   await assert.rejects(() => consultarHistorial(pool, { campo: 'precio' }), (e) => e.status === 400 && /costo, pvp_sin_iva, stock/.test(e.message));
   assert.equal(consultas, 0);
+});
+
+// --- [alertas] subida de coste >=10% (configurable) ---
+
+test('pctVariacion: calcula el % sobre el valor anterior; null sin base real', () => {
+  assert.equal(pctVariacion(10, 11), 10);
+  assert.equal(pctVariacion(10, 12.5), 25);
+  assert.equal(pctVariacion(10, 9), -10);
+  assert.equal(pctVariacion(0, 50), null); // sin base real: nunca se inventa un porcentaje
+  assert.equal(pctVariacion(null, 50), null);
+  assert.equal(pctVariacion(10, null), null);
+});
+
+test('esAlertaSubidaCoste: solo el campo "costo" genera alerta, nunca PVP ni stock', () => {
+  assert.equal(esAlertaSubidaCoste({ campo: 'costo', valor_anterior: 10, valor_nuevo: 11 }, 10), true); // exactamente 10%
+  assert.equal(esAlertaSubidaCoste({ campo: 'costo', valor_anterior: 10, valor_nuevo: 10.5 }, 10), false); // 5%, por debajo
+  assert.equal(esAlertaSubidaCoste({ campo: 'pvp_sin_iva', valor_anterior: 10, valor_nuevo: 20 }, 10), false);
+  assert.equal(esAlertaSubidaCoste({ campo: 'stock', valor_anterior: 10, valor_nuevo: 20 }, 10), false);
+});
+
+test('esAlertaSubidaCoste: una bajada de coste nunca es alerta', () => {
+  assert.equal(esAlertaSubidaCoste({ campo: 'costo', valor_anterior: 10, valor_nuevo: 5 }, 10), false);
+});
+
+test('esAlertaSubidaCoste: respeta un umbral distinto del por defecto', () => {
+  const cambio = { campo: 'costo', valor_anterior: 100, valor_nuevo: 115 }; // +15%
+  assert.equal(esAlertaSubidaCoste(cambio, 10), true);
+  assert.equal(esAlertaSubidaCoste(cambio, 20), false);
+});
+
+test('UMBRAL_ALERTA_COSTE_PCT por defecto es 10 y RETENCION_MESES por defecto es 12', () => {
+  assert.equal(UMBRAL_ALERTA_COSTE_PCT, 10);
+  assert.equal(RETENCION_MESES, 12);
+});
+
+test('filtrarAlertasSubidaCoste: filtra y adjunta variacion_pct, descarta PVP/stock y bajadas', () => {
+  const cambios = [
+    { ref: 'A', campo: 'costo', valor_anterior: 10, valor_nuevo: 12 }, // +20% -> alerta
+    { ref: 'B', campo: 'costo', valor_anterior: 10, valor_nuevo: 10.5 }, // +5% -> no
+    { ref: 'C', campo: 'pvp_sin_iva', valor_anterior: 10, valor_nuevo: 20 }, // +100% pero no es coste
+    { ref: 'D', campo: 'costo', valor_anterior: 10, valor_nuevo: 8 } // bajada
+  ];
+  const r = filtrarAlertasSubidaCoste(cambios, 10);
+  assert.deepEqual(r.map((c) => c.ref), ['A']);
+  assert.equal(r[0].variacion_pct, 20);
+});
+
+test('listarAlertasSubidaCoste: consulta solo cambios de coste y aplica el umbral, limitando el resultado', async () => {
+  const llamadas = [];
+  const pool = {
+    query: async (sql, params) => {
+      llamadas.push({ sql, params });
+      return {
+        rows: [
+          { id: 1, ref: 'A', marca: 'Wolfpack', descripcion: 'Taladro', campo: 'costo', valor_anterior: 10, valor_nuevo: 12, detectado_en: '2026-10-30T10:00:00Z' },
+          { id: 2, ref: 'B', marca: 'Truper', descripcion: 'Llave', campo: 'costo', valor_anterior: 10, valor_nuevo: 10.2, detectado_en: '2026-10-29T10:00:00Z' }
+        ]
+      };
+    }
+  };
+  const r = await listarAlertasSubidaCoste(pool, { limite: 5, ventana: 100, umbralPct: 10 });
+  assert.equal(r.length, 1);
+  assert.equal(r[0].ref, 'A');
+  assert.match(llamadas[0].sql, /WHERE h\.campo = 'costo'/);
+  assert.equal(llamadas[0].params[0], 100); // ventana como límite de la consulta SQL
+});
+
+// --- [retención] política definida (12 meses), SOLO LECTURA, nunca borra ---
+
+test('fechaCorteRetencion: resta exactamente los meses indicados', () => {
+  const ahora = new Date('2026-11-01T12:00:00Z');
+  const corte = fechaCorteRetencion(ahora, 12);
+  assert.equal(corte.toISOString(), '2025-11-01T12:00:00.000Z');
+  const corte6 = fechaCorteRetencion(ahora, 6);
+  assert.equal(corte6.toISOString(), '2026-05-01T12:00:00.000Z');
+});
+
+test('contarPendientesDeRetencion: es una consulta de SOLO LECTURA (ningún DELETE), nunca purga nada', async () => {
+  const llamadas = [];
+  const pool = {
+    query: async (sql, params) => {
+      llamadas.push({ sql, params });
+      return { rows: [{ total: 7 }] };
+    }
+  };
+  const r = await contarPendientesDeRetencion(pool, 12);
+  assert.equal(r.meses, 12);
+  assert.equal(r.pendientesDePurga, 7);
+  assert.equal(llamadas.length, 1);
+  assert.match(llamadas[0].sql, /^\s*SELECT COUNT/i);
+  assert.doesNotMatch(llamadas[0].sql, /DELETE/i);
+});
+
+test('contarPendientesDeRetencion: usa RETENCION_MESES (12) cuando no se especifica', async () => {
+  const pool = {
+    query: async (sql, params) => {
+      // El corte debe corresponder a ~12 meses atrás, no a un valor arbitrario.
+      assert.ok(params[0]);
+      return { rows: [{ total: 0 }] };
+    }
+  };
+  const r = await contarPendientesDeRetencion(pool);
+  assert.equal(r.meses, 12);
 });

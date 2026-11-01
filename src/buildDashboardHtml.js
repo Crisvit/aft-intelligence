@@ -30,7 +30,13 @@ function buildDashboardHtml({
   demandaConectada,
   ultimaFichas,
   fichasBorradores,
-  iaConectada
+  iaConectada,
+  cambiosRows,
+  cambiosTotal,
+  cambiosAlertas,
+  cambiosRetencion,
+  cambiosRetencionMeses,
+  cambiosUmbralAlertaPct
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -341,6 +347,81 @@ const demandaHtml = ultimaDemanda
         '</tbody></table></div>'
       : '<div class="empty-state">El último análisis no generó keywords (sin oportunidades del Agente 4 todavía).</div>')
   : '';
+
+// --- Página Cambios AFT: historial real de coste/PVP/stock por referencia
+//     (ver src/historialCambios.js) — SOLO LECTURA, nunca escribe en AFT ni
+//     en Shopify. Alertas cuando el COSTE sube un 10% o más (configurable,
+//     AFT_CAMBIOS_UMBRAL_ALERTA_PCT); PVP y stock nunca generan esta
+//     alerta. La retención (12 meses por defecto) está definida pero
+//     ninguna purga se ejecuta desde aquí — solo se informa cuántos
+//     registros ya la superan, a la espera de que el procedimiento de
+//     purga se verifique con backups y se apruebe aparte. ---
+const CAMPO_CAMBIO_LABEL = { costo: 'Coste', pvp_sin_iva: 'PVP sin IVA', stock: 'Stock' };
+function variacionPctCambio(c) {
+  const a = Number(c.valor_anterior);
+  const n = Number(c.valor_nuevo);
+  if (!Number.isFinite(a) || !Number.isFinite(n) || a === 0) return null;
+  return ((n - a) / a) * 100;
+}
+function valorCambioFmt(campo, v) {
+  if (v == null) return '—';
+  return campo === 'stock' ? num(Math.round(Number(v))) : eur(v);
+}
+function filaCambio(c) {
+  const variacion = variacionPctCambio(c);
+  const esSubidaCoste = c.campo === 'costo' && variacion != null && variacion >= 0;
+  return '<tr data-ref="' + esc(c.ref) + '" data-campo="' + esc(c.campo) + '">' +
+    '<td data-label="Detectado">' + (c.detectado_en ? new Date(c.detectado_en).toLocaleString('es-ES') : '—') + '</td>' +
+    '<td data-label="Referencia"><div style="font-weight:600;">' + esc(c.ref) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(titleCase(c.descripcion || '')) + (c.marca ? ' · ' + esc(titleCase(c.marca)) : '') + '</div></td>' +
+    '<td data-label="Campo">' + esc(CAMPO_CAMBIO_LABEL[c.campo] || c.campo) + '</td>' +
+    '<td class="num" data-label="Valor anterior">' + valorCambioFmt(c.campo, c.valor_anterior) + '</td>' +
+    '<td class="num" data-label="Valor nuevo">' + valorCambioFmt(c.campo, c.valor_nuevo) + '</td>' +
+    '<td class="num" data-label="Variación">' + (variacion != null ? '<span class="' + (esSubidaCoste ? 'cambio-subida' : (variacion < 0 ? 'ok' : '')) + '">' + (variacion >= 0 ? '+' : '') + variacion.toFixed(1) + '%</span>' : '—') + '</td>' +
+    '<td data-label="Fecha AFT">' + (c.fecha_cambio_aft ? new Date(c.fecha_cambio_aft).toLocaleDateString('es-ES') : '—') + '</td>' +
+    '</tr>';
+}
+function filaAlertaCambio(a) {
+  return '<tr>' +
+    '<td data-label="Detectado">' + (a.detectado_en ? new Date(a.detectado_en).toLocaleString('es-ES') : '—') + '</td>' +
+    '<td data-label="Referencia"><div style="font-weight:600;">' + esc(a.ref) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(titleCase(a.descripcion || '')) + (a.marca ? ' · ' + esc(titleCase(a.marca)) : '') + '</div></td>' +
+    '<td class="num" data-label="Coste anterior">' + eur(a.valor_anterior) + '</td>' +
+    '<td class="num" data-label="Coste nuevo">' + eur(a.valor_nuevo) + '</td>' +
+    '<td class="num" data-label="Subida"><span class="cambio-subida">+' + Number(a.variacion_pct).toFixed(1) + '%</span></td>' +
+    '</tr>';
+}
+const cambiosAlertasSeguro = cambiosAlertas || [];
+const cambiosRowsSeguro = cambiosRows || [];
+const cambiosAlertasHtml = '<h3 style="font-size:14px;margin:0 0 6px;">Alertas de subida de coste' + (cambiosAlertasSeguro.length ? ' <span class="badge badge-warn">' + pl(cambiosAlertasSeguro.length, 'alerta', 'alertas') + '</span>' : '') + '</h3>' +
+  '<p style="font-size:11.5px;color:var(--sub);margin:0 0 14px;">Coste subido un ' + (cambiosUmbralAlertaPct || 10) + '% o más respecto al valor anterior registrado. Solo coste — PVP y stock nunca generan esta alerta.</p>' +
+  (cambiosAlertasSeguro.length
+    ? '<div class="table-scroll"><table><thead><tr><th>Detectado</th><th>Referencia</th><th>Coste anterior</th><th>Coste nuevo</th><th>Subida</th></tr></thead><tbody>' +
+      cambiosAlertasSeguro.map(filaAlertaCambio).join('') +
+      '</tbody></table></div>'
+    : '<div class="empty-state">Ninguna subida de coste igual o mayor al umbral configurado entre los últimos cambios registrados.</div>');
+const cambiosRetencionHtml = cambiosRetencion
+  ? '<div class="table-note" style="margin-top:18px;">Retención definida: ' + pl(cambiosRetencionMeses || 12, 'mes', 'meses') + '. ' +
+    (cambiosRetencion.pendientesDePurga > 0
+      ? num(cambiosRetencion.pendientesDePurga) + ' ' + (cambiosRetencion.pendientesDePurga === 1 ? 'registro supera' : 'registros superan') + ' esa retención — purga pendiente de verificar backups y de aprobación del procedimiento; no se ejecuta ninguna purga automática.'
+      : 'Ningún registro supera todavía esa retención.') +
+    '</div>'
+  : '';
+const cambiosHtml = '<div class="filterbar">' +
+    '<input type="text" id="filtroCambiosRef" class="filter-select" placeholder="Referencia..." style="max-width:160px;"/>' +
+    '<select id="filtroCambiosCampo" class="filter-select"><option value="">Todos los campos</option><option value="costo">Coste</option><option value="pvp_sin_iva">PVP sin IVA</option><option value="stock">Stock</option></select>' +
+    '<input type="date" id="filtroCambiosDesde" class="filter-select"/>' +
+    '<input type="date" id="filtroCambiosHasta" class="filter-select"/>' +
+    '<button class="btn-sm btn-solid" onclick="filtrarCambiosAft()">Filtrar</button>' +
+    '<button class="btn-sm btn-outline" onclick="limpiarFiltrosCambiosAft()">Limpiar</button>' +
+  '</div>' +
+  '<div class="table-note" id="cambiosAftNota">Mostrando los ' + pl(cambiosRowsSeguro.length, 'cambio', 'cambios') + ' más recientes de ' + num(cambiosTotal || 0) + ' en total — coste, PVP sin IVA y stock reales de AFT por referencia, nunca estimados. Un alta (primera vez que aparece la referencia) no cuenta como cambio.</div>' +
+  '<div id="cambiosAftTablaContenedor">' +
+  (cambiosRowsSeguro.length
+    ? '<div class="table-scroll"><table><thead><tr><th>Detectado</th><th>Referencia</th><th>Campo</th><th>Valor anterior</th><th>Valor nuevo</th><th>Variación</th><th>Fecha AFT</th></tr></thead><tbody id="cambiosAftBody">' +
+      cambiosRowsSeguro.map(filaCambio).join('') +
+      '</tbody></table></div>'
+    : '<div class="empty-state">Todavía no se ha registrado ningún cambio real de AFT (coste, PVP sin IVA o stock) en esta base.</div>') +
+  '</div>' +
+  '<div style="margin-top:12px;text-align:center;"><button class="btn-sm btn-outline" id="cambiosAftCargarMasBtn" onclick="cargarMasCambiosAft()"' + (cambiosRowsSeguro.length >= (cambiosTotal || 0) ? ' style="display:none;"' : '') + '>Cargar más</button></div>';
 
 // --- Página Fichas IA (Agente 6): revisión humana obligatoria. Aprobar,
 //     Rechazar y Editar son SIEMPRE cambios de estado en PostgreSQL — no
@@ -735,6 +816,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 'tr:last-child td{border-bottom:none;}' +
 'td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}' +
 '.ok{color:#059669;font-weight:600;}' +
+'.cambio-subida{color:#DC2626;font-weight:600;}' +
 '.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}' +
 '.table-note{font-size:12px;color:var(--sub);margin-bottom:10px;}' +
 '.badge{font-size:11px;padding:3px 9px;border-radius:20px;font-weight:600;white-space:nowrap;}' +
@@ -763,6 +845,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<a class="sb-link" data-page="oportunidades" onclick="ir(this)">' + icon('sparkles', 17) + '<span>Oportunidades</span></a>' +
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
 '<a class="sb-link" data-page="rentabilidad" onclick="ir(this)">' + icon('alertTri', 17) + '<span>Rentabilidad</span></a>' +
+'<a class="sb-link" data-page="cambios-aft" onclick="ir(this)">' + icon('activity', 17) + '<span>Cambios AFT</span></a>' +
 '<a class="sb-link" data-page="actividad" onclick="ir(this)">' + icon('activity', 17) + '<span>Actividad</span></a>' +
 '<a class="sb-link" data-page="fichas" onclick="ir(this)">' + icon('fileText', 17) + '<span>Fichas IA</span></a>' +
 '<div class="sb-sep"></div>' +
@@ -793,6 +876,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
 '<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + resumenEjecutivoHtml + rentabilidadHtml + recomendacionesHtml + '</div>' +
+'<div class="page" id="page-cambios-aft"><div class="pagetitle">Cambios AFT</div>' + cambiosAlertasHtml + '<h3 style="font-size:14px;margin:28px 0 6px;">Historial de cambios</h3>' + cambiosHtml + cambiosRetencionHtml + '</div>' +
 
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
 
@@ -830,6 +914,22 @@ fichasHtml +
 // Previsualización: una sola llamada GET, sin polling (no lanza ninguna
 // ejecución) — pinta la tabla de candidatas directamente en la respuesta.
 'function escPrev(s){return String(s===null||s===undefined?"":s).replace(/[&<>"\']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","\'":"&#39;"}[c];});}' +
+// Cambios AFT: la tabla inicial viene ya renderizada por el servidor
+// (primeros 100); filtrar o pedir más páginas llama a /api/historial-cambios
+// (SOLO LECTURA) y reconstruye el cuerpo de la tabla — sin recargar la
+// página. offset avanza por el tamaño de página real devuelto por el
+// servidor, nunca un valor fijo que pueda desincronizarse.
+'var cambiosAftEstado={offset:' + cambiosRowsSeguro.length + ',limite:100,total:' + (cambiosTotal || 0) + ',acumulando:false};' +
+'var CAMBIOS_AFT_CAMPO_LABEL={costo:"Coste",pvp_sin_iva:"PVP sin IVA",stock:"Stock"};' +
+'function cambiosAftValorFmt(campo,v){if(v===null||v===undefined)return "\\u2014";return campo==="stock"?Math.round(Number(v)):Number(v).toFixed(2)+"\\u20ac";}' +
+'function filaCambioAftCliente(c){var a=Number(c.valor_anterior),n=Number(c.valor_nuevo);var variacion=(isFinite(a)&&isFinite(n)&&a!==0)?((n-a)/a*100):null;var esSubidaCoste=c.campo==="costo"&&variacion!==null&&variacion>=0;var varHtml=variacion===null?"\\u2014":("<span class=\\""+(esSubidaCoste?"cambio-subida":(variacion<0?"ok":""))+"\\">"+(variacion>=0?"+":"")+variacion.toFixed(1)+"%</span>");return "<tr data-ref=\\""+escPrev(c.ref)+"\\" data-campo=\\""+escPrev(c.campo)+"\\">"+"<td data-label=\\"Detectado\\">"+(c.detectado_en?new Date(c.detectado_en).toLocaleString("es-ES"):"\\u2014")+"</td>"+"<td data-label=\\"Referencia\\"><div style=\\"font-weight:600;\\">"+escPrev(c.ref)+"</div><div style=\\"font-size:11px;color:var(--sub);\\">"+escPrev(c.descripcion||"")+(c.marca?" \\u00b7 "+escPrev(c.marca):"")+"</div></td>"+"<td data-label=\\"Campo\\">"+escPrev(CAMBIOS_AFT_CAMPO_LABEL[c.campo]||c.campo)+"</td>"+"<td class=\\"num\\" data-label=\\"Valor anterior\\">"+cambiosAftValorFmt(c.campo,c.valor_anterior)+"</td>"+"<td class=\\"num\\" data-label=\\"Valor nuevo\\">"+cambiosAftValorFmt(c.campo,c.valor_nuevo)+"</td>"+"<td class=\\"num\\" data-label=\\"Variaci\\u00f3n\\">"+varHtml+"</td>"+"<td data-label=\\"Fecha AFT\\">"+(c.fecha_cambio_aft?new Date(c.fecha_cambio_aft).toLocaleDateString("es-ES"):"\\u2014")+"</td></tr>";}' +
+'function cambiosAftQueryActual(){var p=new URLSearchParams();var ref=(document.getElementById("filtroCambiosRef")||{}).value;var campo=(document.getElementById("filtroCambiosCampo")||{}).value;var desde=(document.getElementById("filtroCambiosDesde")||{}).value;var hasta=(document.getElementById("filtroCambiosHasta")||{}).value;if(ref)p.set("ref",ref.trim());if(campo)p.set("campo",campo);if(desde)p.set("desde",desde);if(hasta)p.set("hasta",hasta);return p;}' +
+'function cambiosAftActualizarNota(){var nota=document.getElementById("cambiosAftNota");if(!nota)return;var mostrados=document.querySelectorAll("#cambiosAftBody tr").length;nota.textContent="Mostrando "+mostrados+" de "+cambiosAftEstado.total+" en total \\u2014 coste, PVP sin IVA y stock reales de AFT por referencia, nunca estimados. Un alta (primera vez que aparece la referencia) no cuenta como cambio.";}' +
+'function cambiosAftActualizarBotonMas(){var btn=document.getElementById("cambiosAftCargarMasBtn");if(!btn)return;var mostrados=document.querySelectorAll("#cambiosAftBody tr").length;btn.style.display=(mostrados>=cambiosAftEstado.total)?"none":"";}' +
+'function cambiosAftCargar(acumular){var body=document.getElementById("cambiosAftBody");var contenedor=document.getElementById("cambiosAftTablaContenedor");var p=cambiosAftQueryActual();p.set("limite",cambiosAftEstado.limite);p.set("offset",acumular?cambiosAftEstado.offset:0);fetch("/api/historial-cambios?"+p.toString()).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status!==200||!res.data||!res.data.ok){if(contenedor)contenedor.innerHTML="<div class=\\"empty-state\\">Error al cargar el historial"+(res.data&&res.data.error?(": "+escPrev(res.data.error)):"")+".</div>";return;}var d=res.data;cambiosAftEstado.total=d.total;cambiosAftEstado.offset=d.offset+(d.cambios?d.cambios.length:0);var filasHtml=(d.cambios||[]).map(filaCambioAftCliente).join("");if(!acumular){if(!d.cambios||!d.cambios.length){contenedor.innerHTML="<div class=\\"empty-state\\">Ning\\u00fan cambio coincide con estos filtros.</div>";}else{contenedor.innerHTML="<div class=\\"table-scroll\\"><table><thead><tr><th>Detectado</th><th>Referencia</th><th>Campo</th><th>Valor anterior</th><th>Valor nuevo</th><th>Variaci\\u00f3n</th><th>Fecha AFT</th></tr></thead><tbody id=\\"cambiosAftBody\\">"+filasHtml+"</tbody></table></div>";}}else if(body){body.insertAdjacentHTML("beforeend",filasHtml);}cambiosAftActualizarNota();cambiosAftActualizarBotonMas();}).catch(function(){if(contenedor)contenedor.innerHTML="<div class=\\"empty-state\\">Error de red al contactar con el servidor.</div>";});}' +
+'function filtrarCambiosAft(){cambiosAftEstado.offset=0;cambiosAftCargar(false);}' +
+'function limpiarFiltrosCambiosAft(){["filtroCambiosRef","filtroCambiosCampo","filtroCambiosDesde","filtroCambiosHasta"].forEach(function(id){var el=document.getElementById(id);if(el)el.value="";});filtrarCambiosAft();}' +
+'function cargarMasCambiosAft(){cambiosAftCargar(true);}' +
 'function cargarPrevisualizacionReposicion(btn){btn.disabled=true;var original=btn.textContent;btn.innerHTML="<span class=\\"spinner dark\\"></span>Cargando...";var out=document.getElementById("previsualizacionResultado");if(out){out.textContent="";out.style.color="";}var cont=document.getElementById("previsualizacionContenedor");fetch("/api/reposicion-run/previsualizacion").then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){btn.disabled=false;btn.textContent=original;if(res.status!==200||!res.data||!res.data.ok){if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}return;}var d=res.data;var banner=d.datosDesactualizados?("<div class=\\"stale-banner\\">\\u26a0 Los datos no se actualizan desde hace m\\u00e1s de "+d.horasLimiteDesactualizado+" horas"+(d.ultimaSync&&d.ultimaSync.finishedAt?(" (\\u00faltima sincronizaci\\u00f3n: "+new Date(d.ultimaSync.finishedAt).toLocaleString("es-ES")+")"):" (nunca se ha sincronizado)")+". Ejecuta una nueva sincronizaci\\u00f3n desde Integraciones antes de fiarte de esta lista.</div>"):"";var ubic="<p style=\\"font-size:11px;color:var(--sub);margin:8px 0;\\">Ubicaci\\u00f3n de escritura configurada: <code>"+escPrev(d.ubicacionConfigurada)+"</code> \\u00b7 "+d.totalConDiferencia+" de "+d.totalCandidatosFiables+" candidatas fiables tienen diferencia de stock.</p>";if(!d.candidatos||!d.candidatos.length){cont.innerHTML=banner+ubic+"<div class=\\"empty-state\\">No hay candidatas con diferencia de stock ahora mismo.</div>";return;}var filas=d.candidatos.map(function(c){var signo=c.diferencia>0?"+":"";return "<tr><td data-label=\\"Referencia\\"><div style=\\"font-weight:600;\\">"+escPrev(c.ref)+"</div><div style=\\"font-size:11px;color:var(--sub);\\">"+escPrev(c.nombre||"(sin t\\u00edtulo)")+"</div></td>"+"<td data-label=\\"EAN/SKU\\">"+escPrev(c.ean||"\\u2014")+" <span style=\\"color:var(--sub);\\">("+escPrev(c.matchedBy)+")</span></td>"+"<td class=\\"num\\" data-label=\\"Stock AFT\\">"+c.stockAft+"</td>"+"<td class=\\"num\\" data-label=\\"Stock Shopify\\">"+c.stockShopify+"</td>"+"<td class=\\"num\\" data-label=\\"Diferencia\\">"+signo+c.diferencia+"</td>"+"<td data-label=\\"Ubicaci\\u00f3n\\">"+(c.ubicacionVerificada?"<span class=\\"ok\\">Verificada</span>":"<span style=\\"color:#DC2626;\\">No verificada</span>")+"</td>"+"<td data-label=\\"Reservas/pedidos\\">"+escPrev(c.reservasPendientes)+"</td>"+"<td data-label=\\"Sincronizado\\">"+(c.checkedAt?new Date(c.checkedAt).toLocaleString("es-ES"):"\\u2014")+"</td></tr>";}).join("");cont.innerHTML=banner+ubic+"<div class=\\"table-scroll\\"><table><thead><tr><th>Referencia</th><th>EAN/SKU</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Ubicaci\\u00f3n</th><th>Reservas/pedidos</th><th>Sincronizado</th></tr></thead><tbody>"+filas+"</tbody></table></div>";}).catch(function(){btn.disabled=false;btn.textContent=original;if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 'function filtrarRentabilidad(){var q=(document.getElementById("buscarRentabilidad").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoRentabilidad").value;var visibles=0;document.querySelectorAll("#tablaRentabilidadBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorRentabilidad");var total=document.querySelectorAll("#tablaRentabilidadBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" producto.":" productos.");}' +
 'var rentPollTimer=null;' +

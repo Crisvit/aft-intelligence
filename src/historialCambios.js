@@ -22,6 +22,17 @@ const CAMPOS = ['costo', 'pvp_sin_iva', 'stock'];
 // céntimo es ruido de representación, no un cambio de precio.
 const EPSILON_IMPORTE = 0.005;
 
+// Alerta cuando el COSTE (nunca PVP ni stock) sube un 10% o más respecto al
+// valor anterior — configurable, nunca hardcoded sin forma de ajustarlo.
+const UMBRAL_ALERTA_COSTE_PCT = Number(process.env.AFT_CAMBIOS_UMBRAL_ALERTA_PCT) || 10;
+
+// Política de retención — SOLO DEFINIDA, sin ejecutar ninguna purga: este
+// módulo no borra ninguna fila de aft_cambios. El número de meses es
+// informativo (se muestra en el panel) hasta que el procedimiento de
+// purga se diseñe, se pruebe con backups verificados y se apruebe por
+// separado. No añadir código de borrado aquí sin esa aprobación explícita.
+const RETENCION_MESES = Number(process.env.AFT_CAMBIOS_RETENCION_MESES) || 12;
+
 function aNumero(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -54,6 +65,36 @@ function detectarCambios(previos, nuevas) {
     }
   }
   return cambios;
+}
+
+// % de variación de un valor sobre el anterior. null si no hay base real
+// sobre la que calcular un porcentaje (anterior 0 o ausente) — nunca se
+// inventa un porcentaje a partir de una base inexistente.
+// Función pura.
+function pctVariacion(anterior, nuevo) {
+  if (anterior === null || anterior === undefined || nuevo === null || nuevo === undefined) return null;
+  const a = Number(anterior);
+  const n = Number(nuevo);
+  if (!Number.isFinite(a) || !Number.isFinite(n) || a === 0) return null;
+  return ((n - a) / a) * 100;
+}
+
+// Un cambio es una alerta de subida de coste si es del campo 'costo' y su
+// variación alcanza el umbral configurado (10% por defecto). PVP y stock
+// nunca generan esta alerta — es específica de coste, como se pidió.
+// Función pura.
+function esAlertaSubidaCoste(cambio, umbralPct = UMBRAL_ALERTA_COSTE_PCT) {
+  if (!cambio || cambio.campo !== 'costo') return false;
+  const pct = pctVariacion(cambio.valor_anterior, cambio.valor_nuevo);
+  return pct != null && pct >= umbralPct;
+}
+
+// Filtra y adjunta el % de variación a los cambios de coste que superan el
+// umbral, más recientes primero. Función pura.
+function filtrarAlertasSubidaCoste(cambios, umbralPct = UMBRAL_ALERTA_COSTE_PCT) {
+  return cambios
+    .filter((c) => esAlertaSubidaCoste(c, umbralPct))
+    .map((c) => ({ ...c, variacion_pct: pctVariacion(c.valor_anterior, c.valor_nuevo) }));
 }
 
 // Convierte la salida de valoresStock() de sync.js
@@ -137,6 +178,46 @@ async function consultarHistorial(pool, filtros) {
   return { total: totalRows[0].total, limite: f.limite, offset: f.offset, cambios: rows };
 }
 
+// SOLO LECTURA: últimas alertas de subida de coste (>= umbral), con marca y
+// descripción para mostrarlas en el panel. Revisa los últimos `ventana`
+// cambios de coste (por defecto 500) y filtra los que alcanzan el umbral —
+// no hace falta registrar las alertas aparte: se derivan siempre de
+// aft_cambios, la misma fuente que el resto del historial.
+async function listarAlertasSubidaCoste(pool, { limite = 50, ventana = 500, umbralPct = UMBRAL_ALERTA_COSTE_PCT } = {}) {
+  const { rows } = await pool.query(
+    `SELECT h.id, h.ref, c.marca, c.descripcion_corta AS descripcion, h.campo,
+            h.valor_anterior, h.valor_nuevo, h.fecha_cambio_aft, h.detectado_en
+     FROM aft_cambios h LEFT JOIN aft_catalogo c ON c.ref = h.ref
+     WHERE h.campo = 'costo'
+     ORDER BY h.detectado_en DESC, h.id DESC
+     LIMIT $1`,
+    [ventana]
+  );
+  return filtrarAlertasSubidaCoste(rows, umbralPct).slice(0, limite);
+}
+
+// Fecha de corte pura: todo lo detectado ANTES de esta fecha está fuera de
+// la retención definida. No decide nada por sí sola — solo la usa la
+// consulta de SOLO LECTURA de abajo.
+function fechaCorteRetencion(ahora = new Date(), meses = RETENCION_MESES) {
+  const corte = new Date(ahora);
+  corte.setUTCMonth(corte.getUTCMonth() - meses);
+  return corte;
+}
+
+// SOLO LECTURA: cuenta cuántas filas de aft_cambios son más antiguas que la
+// retención definida. Informativo para el panel — este módulo NUNCA borra
+// filas de aft_cambios; cualquier purga real es un procedimiento aparte,
+// pendiente de verificar backups y de aprobación explícita.
+async function contarPendientesDeRetencion(pool, meses = RETENCION_MESES) {
+  const corte = fechaCorteRetencion(new Date(), meses);
+  const { rows } = await pool.query(`SELECT COUNT(*)::int AS total FROM aft_cambios WHERE detectado_en < $1`, [corte.toISOString()]);
+  return { meses, corte: corte.toISOString(), pendientesDePurga: rows[0].total };
+}
+
 module.exports = {
-  CAMPOS, EPSILON_IMPORTE, detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros, filaDesdeValoresStock
+  CAMPOS, EPSILON_IMPORTE, UMBRAL_ALERTA_COSTE_PCT, RETENCION_MESES,
+  detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros, filaDesdeValoresStock,
+  pctVariacion, esAlertaSubidaCoste, filtrarAlertasSubidaCoste, listarAlertasSubidaCoste,
+  fechaCorteRetencion, contarPendientesDeRetencion
 };

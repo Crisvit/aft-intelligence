@@ -16,7 +16,7 @@ const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemand
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
-const { consultarHistorial } = require('./src/historialCambios');
+const { consultarHistorial, listarAlertasSubidaCoste, contarPendientesDeRetencion, RETENCION_MESES, UMBRAL_ALERTA_COSTE_PCT } = require('./src/historialCambios');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -813,6 +813,16 @@ async function renderDashboard() {
   // variable de entorno que usa shopifyClient.js para hablar con la API.
   const shopifyAdminStore = (process.env.SHOPIFY_SHOP || '').replace(/\.myshopify\.com$/i, '');
 
+  // Historial de cambios reales de AFT (coste, PVP sin IVA, stock) — foto
+  // inicial para la página "Cambios AFT" (los filtros por fecha/ref/campo
+  // se resuelven después vía /api/historial-cambios, solo lectura). Las
+  // alertas de subida de coste (>=10% por defecto) y el recuento de
+  // retención son igualmente de solo lectura: ninguna consulta de esta
+  // sección borra nada.
+  const { cambios: cambiosRows, total: cambiosTotal } = await consultarHistorial(pool, { limite: 100, offset: 0 });
+  const cambiosAlertas = await listarAlertasSubidaCoste(pool, { limite: 50 });
+  const cambiosRetencion = await contarPendientesDeRetencion(pool);
+
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
@@ -825,7 +835,9 @@ async function renderDashboard() {
     ultimaDemanda, demandaResultados,
     demandaConectada: hayIntegracionDemandaConfigurada(),
     ultimaFichas, fichasBorradores,
-    iaConectada: hayProveedorIaConfigurado()
+    iaConectada: hayProveedorIaConfigurado(),
+    cambiosRows, cambiosTotal, cambiosAlertas, cambiosRetencion, cambiosRetencionMeses: RETENCION_MESES,
+    cambiosUmbralAlertaPct: UMBRAL_ALERTA_COSTE_PCT
   });
 
   cache = { html, builtAt: now };
