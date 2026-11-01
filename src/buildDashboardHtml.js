@@ -23,6 +23,8 @@ function buildDashboardHtml({
   shopifyAdminStore,
   ultimaReposicion,
   reposicionEventos,
+  ultimaReposicionEfectiva,
+  reposicionBloqueados,
   shopifyWriteEnabled,
   ultimaOportunidades,
   ultimaDemanda,
@@ -718,6 +720,10 @@ function estadoReposicion(){
   if (!ultimaReposicion) return { dot: 'dot-warn', texto: 'Nunca ejecutada' };
   if (ultimaReposicion.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
   if (ultimaReposicion.status === 'error') return { dot: 'dot-err', texto: 'Error en la última ejecución' };
+  // 'parcial': hubo escritura real activa, pero con errores o escrituras sin
+  // verificar — nunca se muestra como completa sin más, para no ocultar que
+  // el día no quedó del todo sincronizado.
+  if (ultimaReposicion.status === 'parcial') return { dot: 'dot-warn', texto: 'Parcial (con errores o sin verificar) ' + tiempoRelativo(ultimaReposicion.finished_at) };
   return { dot: 'dot-ok', texto: 'Completa ' + tiempoRelativo(ultimaReposicion.finished_at) };
 }
 const eImport = estadoImport();
@@ -767,8 +773,28 @@ const integracionesHtml =
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + eRepo.dot + '" id="repoEstadoDot"></span><div><div class="integ-name">Reposición automática de stock ' + repoBadge + '</div><div class="integ-sub">Agente 2, paso 2 — escribe en Shopify la cantidad "disponible" confirmada por AFT, solo en coincidencias fiables</div></div><span class="integ-status" id="repoEstadoTexto">' + esc(eRepo.texto) + '</span></div>' +
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarReposicion(this)">Ejecutar reposición</button><span id="repoResultado" class="integ-sub"></span></div>' +
-    (ultimaReposicion ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaReposicion.total_candidatos) + ' candidatos · ' + num(ultimaReposicion.recuperados_stock_cero) + ' recuperados de stock cero/negativo · ' + num(ultimaReposicion.reposiciones_detectadas) + ' reposiciones · ' + num(ultimaReposicion.correcciones_a_la_baja) + ' correcciones a la baja · ' + num(ultimaReposicion.errores) + ' errores' + (ultimaReposicion.verificaciones_fallidas > 0 ? ' · ' + num(ultimaReposicion.verificaciones_fallidas) + ' verificaciones fallidas' : '') + '</div>' : '') +
+    (ultimaReposicion ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaReposicion.total_candidatos) + ' candidatos · <strong>' + num(ultimaReposicion.actualizados) + ' actualizados de verdad en Shopify</strong> · ' + num(ultimaReposicion.simulados) + ' solo simulados (dry run) · ' + num(ultimaReposicion.recuperados_stock_cero) + ' recuperados de stock cero/negativo · ' + num(ultimaReposicion.reposiciones_detectadas) + ' reposiciones · ' + num(ultimaReposicion.correcciones_a_la_baja) + ' correcciones a la baja · ' + num(ultimaReposicion.errores) + ' errores' + (ultimaReposicion.verificaciones_fallidas > 0 ? ' · ' + num(ultimaReposicion.verificaciones_fallidas) + ' verificaciones fallidas' : '') + '</div>' : '') +
+    (ultimaReposicionEfectiva
+      ? '<div class="integ-sub" style="margin-top:4px;">Última sincronización EFECTIVA (con escritura real confirmada en Shopify): ' + esc(tiempoRelativo(ultimaReposicionEfectiva.finished_at)) + ' · ' + num(ultimaReposicionEfectiva.actualizados) + ' actualizados' + (ultimaReposicionEfectiva.status === 'parcial' ? ' (parcial — revisar errores de ese run)' : '') + '</div>'
+      : '<div class="integ-sub" style="margin-top:4px;color:#B45309;">Todavía no ha habido ninguna sincronización con escritura real confirmada en Shopify — el inventario de AFT nunca se ha actualizado de verdad hasta ahora.</div>') +
     '<div class="integ-sub" style="margin-top:8px;">' + (shopifyWriteEnabled ? 'SHOPIFY_WRITE_ENABLED está activo — si además la app tiene el scope write_inventory concedido, escribe de verdad en Shopify (cantidad "available", nunca on_hand/comprometido/reservado) y verifica cada escritura con una lectura posterior.' : 'DRY RUN: sin SHOPIFY_WRITE_ENABLED=true, este paso solo calcula y registra lo que haría — nunca llama a Shopify para escribir.') + ' Nunca actualiza coincidencias ambiguas, sin referencia, con stock de AFT negativo o con ubicación dudosa.</div>' +
+    (reposicionBloqueados ? (() => {
+      const motivos = [
+        ['sin_match_fiable', 'sin coincidencia EAN/SKU fiable'],
+        ['duplicado', 'coincidencia duplicada'],
+        ['multiples_ubicaciones', 'múltiples ubicaciones'],
+        ['ubicacion_no_encontrada', 'ubicación no encontrada'],
+        ['bloqueo_manual', 'bloqueo manual (bloquear_escritura)'],
+        ['sin_inventory_item_id', 'sin inventory_item_id de Shopify'],
+        ['sin_stock_shopify', 'sin stock de Shopify leído'],
+        ['sin_stock_aft', 'sin stock de AFT (referencia no vista en la última importación)'],
+        ['stock_aft_negativo', 'stock de AFT negativo (dato anómalo)']
+      ].filter(([clave]) => Number(reposicionBloqueados[clave]) > 0);
+      if (!motivos.length) return '';
+      return '<div class="integ-sub" style="margin-top:10px;"><strong>Referencias bloqueadas (no candidatas a actualizarse), por motivo</strong> — un mismo bloqueo puede tener varios motivos a la vez, así que no son sumables entre sí:<br>' +
+        motivos.map(([clave, texto]) => esc(texto) + ': ' + num(reposicionBloqueados[clave])).join(' · ') +
+        '</div>';
+    })() : '') +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + eRent.dot + '" id="rentEstadoDot"></span><div><div class="integ-name">Rentabilidad</div><div class="integ-sub">Coste desglosado + transporte configurado + alertas — solo lee hmt-db</div></div><span class="integ-status" id="rentEstadoTexto">' + esc(eRent.texto) + '</span></div>' +
