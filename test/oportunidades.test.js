@@ -34,3 +34,32 @@ test('calcularOportunidad: candidata a venta complementaria solo con margen>=0 y
   const noComplementariaPorMargenNegativo = calcularOportunidad({ marca: 'MAURER', margenPct: -5, stock: 5, precio: 10 });
   assert.equal(noComplementariaPorMargenNegativo.esComplementaria, false);
 });
+
+// --- Características adicionales (caracterización previa a mover la
+// función a src/domain/, para detectar cualquier cambio de comportamiento
+// en el traslado) ---
+
+test('[caracterización] margen negativo nunca resta puntos, se queda en 0 para ese componente', () => {
+  const r = calcularOportunidad({ marca: 'OTRA', margenPct: -30, stock: 0, precio: null });
+  assert.equal(r.score, 0); // ni margen ni stock aportan, nunca negativo
+  assert.match(r.motivo, /margen proyectado -30% \(\+0 pts\)/);
+});
+
+test('[caracterización] margen y stock por encima del umbral de saturación no superan el peso máximo', () => {
+  const r = calcularOportunidad({ marca: 'OTRA', margenPct: 500, stock: 100000, precio: null });
+  // margen satura en MARGEN_REFERENCIA_SATURACION=50 -> PESO_MARGEN_MAX=40;
+  // stock satura en STOCK_REFERENCIA_SATURACION=20 -> PESO_STOCK_MAX=20.
+  assert.equal(r.score, 60); // 0 (no prioritaria) + 40 (margen saturado) + 20 (stock saturado)
+});
+
+test('[caracterización] marca no prioritaria se refleja literalmente en el motivo', () => {
+  const r = calcularOportunidad({ marca: 'MARCA INVENTADA', margenPct: null, stock: 0, precio: null });
+  assert.equal(r.esPrioritaria, false);
+  assert.match(r.motivo, /marca no prioritaria \(\+0 pts\)/);
+});
+
+test('[caracterización] stock negativo (dato anómalo) no resta puntos, se queda en 0 para ese componente', () => {
+  const r = calcularOportunidad({ marca: 'OTRA', margenPct: null, stock: -10, precio: null });
+  assert.equal(r.score, 0);
+  assert.match(r.motivo, /stock AFT -10 uds\. \(\+0 pts\)/);
+});

@@ -53,3 +53,34 @@ test('calcularCosteYMargen: detecta stock cero y negativo sin ambigüedad', () =
   assert.equal(calcularCosteYMargen({ stock: -2, costo: 1, pvp_sin_iva: 1, por_iva: 21 }).stockNegativo, true);
   assert.equal(calcularCosteYMargen({ stock: 3, costo: 1, pvp_sin_iva: 1, por_iva: 21 }).stockCero, false);
 });
+
+// --- Características adicionales (caracterización previa a mover la
+// función a src/domain/, para detectar cualquier cambio de comportamiento
+// en el traslado) ---
+
+test('[caracterización] los otros tipos de IVA/recargo conocidos (10% y 4%) también se aplican', () => {
+  const r10 = calcularCosteYMargen({ stock: 1, costo: 100, pvp_sin_iva: 50, por_iva: 10 });
+  assert.equal(r10.recargoDesconocido, false);
+  assert.equal(r10.recargoAplicado, 1.4);
+  assert.equal(r10.recargoImporte, 1.4); // 100 * 1.4%
+
+  const r4 = calcularCosteYMargen({ stock: 1, costo: 100, pvp_sin_iva: 50, por_iva: 4 });
+  assert.equal(r4.recargoDesconocido, false);
+  assert.equal(r4.recargoAplicado, 0.5);
+  assert.equal(r4.recargoImporte, 0.5); // 100 * 0.5%
+});
+
+test('[caracterización] el umbral de transporte es inclusivo: exactamente 30€ con IVA ya cobra el transporte', () => {
+  // pvp_sin_iva=30/1.21 => precioVentaAFT = round2(30) = 30.00 exactos
+  const r = calcularCosteYMargen({ stock: 1, costo: 5, pvp_sin_iva: round2(30 / 1.21), por_iva: 21, marca: 'X', categoria_nombre: 'Y' });
+  assert.equal(r.precioVentaAFT, 30);
+  assert.equal(r.transporteHerramitienda, 4.41); // >= 30, no solo > 30
+});
+
+test('[caracterización] la referencia, EAN, marca y descripción pasan intactas al resultado', () => {
+  const r = calcularCosteYMargen({ ref: 'REF-1', ean: 'EAN-1', marca: 'Wolfpack', descripcion: 'Taladro', stock: 1, costo: 1, pvp_sin_iva: 1, por_iva: 21 });
+  assert.equal(r.ref, 'REF-1');
+  assert.equal(r.ean, 'EAN-1');
+  assert.equal(r.marca, 'Wolfpack'); // sin normalizar en el resultado, solo para la comparación interna
+  assert.equal(r.descripcion, 'Taladro');
+});
