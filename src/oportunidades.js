@@ -16,54 +16,51 @@
 // descarta aquí a propósito: sin dato real, el componente vale 0, no un
 // valor intermedio inventado.
 const { pool } = require('./db');
-const { BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD, round2 } = require('./sync');
+const { STOCK_MINIMO_OPORTUNIDAD } = require('./sync');
+const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX, seleccionarRanking, calcularTotalesOportunidades } = require('./domain/oportunidades');
+const { clasificarMargen } = require('./domain/margen');
+const { normalizarCategoria } = require('./domain/afinidad');
+const { resolucionDesdeFila } = require('./domain/afinidadResolucion');
+const { fechaMadrid } = require('./domain/fecha');
+const afinidadResolucionRepo = require('./repositories/afinidadResolucionRepo');
+const snapshotsRepo = require('./repositories/snapshotsRepo');
 
-const PVP_COMPLEMENTO_MAX = Number(process.env.OPORTUNIDADES_PVP_COMPLEMENTO_MAX) || 15;
-const PESO_MARCA_PRIORITARIA = Number(process.env.OPORTUNIDADES_PESO_MARCA_PRIORITARIA) || 40;
-const PESO_MARGEN_MAX = Number(process.env.OPORTUNIDADES_PESO_MARGEN_MAX) || 40;
-const PESO_STOCK_MAX = Number(process.env.OPORTUNIDADES_PESO_STOCK_MAX) || 20;
-// Unidades de stock AFT a partir de las cuales el componente de stock
-// satura (no sigue sumando por tener aún más unidades).
-const STOCK_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_STOCK_REFERENCIA) || 20;
-// Margen proyectado (%) a partir del cual el componente de margen satura.
-const MARGEN_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_MARGEN_REFERENCIA) || 50;
-
-function esMarcaPrioritaria(marca) {
-  return BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
+// Fase 3 — afinidad persistente: una decisión humana sobre una categoría
+// (tabla afinidad_categorias_resueltas) prevalece siempre sobre la
+// clasificación automática, mientras esté vigente ('activa'). Se carga
+// una vez por ejecución (nunca una consulta por fila) y se aplica aquí,
+// en la capa exterior — el dominio (calcularOportunidad) sigue siendo
+// puro: solo recibe la resolución ya resuelta como dato, nunca consulta
+// nada por sí mismo. Un fallo al cargar las resoluciones no bloquea la
+// ejecución: se continúa sin ninguna resolución aplicada (equivalente a
+// modo observación — ninguna categoría queda peor que sin esta función).
+async function cargarMapaResolucionesAfinidad() {
+  const mapa = new Map();
+  try {
+    const filas = await afinidadResolucionRepo.listarActivas();
+    for (const fila of filas) mapa.set(fila.categoria_normalizada, resolucionDesdeFila(fila));
+  } catch (e) {
+    console.error(`[oportunidades] No se pudieron cargar las resoluciones de afinidad persistidas: ${e.message}. Se continúa sin ninguna aplicada.`);
+  }
+  return mapa;
 }
 
-// Cada componente del score es trazable a un dato real de hmt-db; el
-// "motivo" concatena exactamente esos mismos números, nunca una
-// explicación genérica desconectada del cálculo.
-function calcularOportunidad(row) {
-  const prioritaria = esMarcaPrioritaria(row.marca);
-  const margen = row.margenPct != null ? Number(row.margenPct) : null;
-  const stock = row.stock != null ? Number(row.stock) : 0;
-  const pvp = row.precio != null ? Number(row.precio) : null;
-
-  const ptsMarca = prioritaria ? PESO_MARCA_PRIORITARIA : 0;
-  const ptsMargen = margen != null ? round2(Math.max(0, Math.min(1, margen / MARGEN_REFERENCIA_SATURACION)) * PESO_MARGEN_MAX) : 0;
-  const ptsStock = round2(Math.max(0, Math.min(1, stock / STOCK_REFERENCIA_SATURACION)) * PESO_STOCK_MAX);
-  const score = round2(ptsMarca + ptsMargen + ptsStock);
-
-  // Complementaria: margen proyectado no negativo y PVP recomendado bajo —
-  // candidato a venta cruzada, nunca una señal de demanda real (no hay
-  // ninguna fuente de demanda conectada en este cálculo).
-  const esComplementaria = margen != null && margen >= 0 && pvp != null && pvp <= PVP_COMPLEMENTO_MAX;
-
-  const partes = [];
-  partes.push(prioritaria ? `marca prioritaria (${row.marca || '—'}, +${ptsMarca} pts)` : 'marca no prioritaria (+0 pts)');
-  partes.push(margen != null ? `margen proyectado ${margen}% (+${ptsMargen} pts)` : 'margen proyectado no disponible (+0 pts)');
-  partes.push(`stock AFT ${stock} uds. (+${ptsStock} pts)`);
-  if (esComplementaria) partes.push(`PVP ${pvp}€ ≤ ${PVP_COMPLEMENTO_MAX}€ — candidata a venta complementaria`);
-  const motivo = 'Puntuación ' + score + '/100: ' + partes.join(' · ') + '.';
-
-  return { score, esPrioritaria: prioritaria, esComplementaria, motivo };
-}
+// Fase 2 — límites del ranking principal, configurables. NO filtran lo que
+// se guarda (ver seleccionarRanking): solo decide cuáles quedan marcadas
+// 'recomendada' frente a 'excedente_categoria'/'excedente_total'. Todos los
+// candidatos válidos se persisten siempre en oportunidades_resultados.
+const MAX_POR_CATEGORIA = Number(process.env.OPORTUNIDADES_MAX_POR_CATEGORIA) || 4;
+const MAX_CANDIDATOS_TOTAL = Number(process.env.OPORTUNIDADES_MAX_CANDIDATOS_TOTAL) || 60;
+// Gate independiente del peso de afinidad (OPORTUNIDADES_PESO_AFINIDAD):
+// con este flag en false (por defecto), la afinidad nunca decide
+// elegibilidad, solo se calcula y se muestra en "motivo" — modo observación
+// completo, sin alterar ninguna recomendación existente.
+const FILTRO_AFINIDAD_ACTIVO = process.env.OPORTUNIDADES_FILTRO_AFINIDAD_ACTIVO === 'true';
 
 const RESULT_COLS = [
   'ref', 'ean', 'marca', 'descripcion', 'categoria_nombre', 'stock_aft', 'coste', 'portes_proveedor_aft',
-  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo'
+  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo',
+  'afinidad_clase', 'afinidad_motivo', 'margen_clasificacion', 'margen_prioridad_adicional', 'estado_elegibilidad'
 ];
 function valoresResultado(f) { return RESULT_COLS.map((c) => (f[c] !== undefined ? f[c] : null)); }
 function construirInsertResultados(numFilas) {
@@ -100,6 +97,31 @@ async function guardarResultadosEnLotes(filas) {
   return guardadas;
 }
 
+// Fase 2 — una incidencia 'afinidad_ambigua' por ref con categoría que no
+// coincide con ninguna lista configurada, para revisión humana. Siempre se
+// registra (independiente de OPORTUNIDADES_FILTRO_AFINIDAD_ACTIVO: ese flag
+// solo decide si afecta al ranking, nunca si se avisa de la ambigüedad).
+// ON CONFLICT DO NOTHING sobre el índice único parcial — seguro frente a
+// ejecuciones simultáneas, sin "SELECT primero" con condición de carrera.
+// Deliberadamente separado de cualquier tabla/campo de autorización
+// comercial excepcional de márgenes (ver src/domain/margen.js) — no se
+// mezclan estos dos mecanismos de resolución.
+async function registrarIncidenciasAfinidadAmbigua(ranking) {
+  const ambiguas = ranking.filter((c) => c.afinidad && c.afinidad.clase === 'ambigua');
+  for (const c of ambiguas) {
+    try {
+      await pool.query(
+        `INSERT INTO incidencias (ref, ean, tipo, detalle, categoria_normalizada)
+         VALUES ($1, $2, 'afinidad_ambigua', $3, $4)
+         ON CONFLICT (ref) WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente' DO NOTHING`,
+        [c.ref, c.ean, c.afinidad.motivo, normalizarCategoria(c.categoria)]
+      );
+    } catch (e) {
+      console.error(`[oportunidades] Error SQL registrando incidencia afinidad_ambigua ref=${c.ref}: ${e.message}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Universo: referencias AFT de marcas/categorías comerciales (filtro ya
 // aplicado por sync.js) con stock mínimo configurado, que la última
@@ -128,22 +150,44 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
 
     await pool.query(`UPDATE oportunidades_runs SET fase = 'calculando', total_candidatos = $2 WHERE id = $1`, [runId, rows.length]);
 
+    const resolucionesAfinidad = await cargarMapaResolucionesAfinidad();
+
     let prioritarias = 0, complementarias = 0;
-    const resultados = rows.map((row) => {
-      const o = calcularOportunidad(row);
+    const calculados = rows.map((row) => {
+      const resolucionAfinidad = resolucionesAfinidad.get(normalizarCategoria(row.categoria_nombre)) || undefined;
+      const o = calcularOportunidad({ ...row, categoria: row.categoria_nombre, resolucionAfinidad });
       if (o.esPrioritaria) prioritarias++;
       if (o.esComplementaria) complementarias++;
+      const margen = clasificarMargen(row.margenPct != null ? Number(row.margenPct) : null);
       return {
-        ref: row.ref, ean: row.ean, marca: row.marca, descripcion: row.descripcion, categoria_nombre: row.categoria_nombre,
-        stock_aft: row.stock, coste: row.coste, portes_proveedor_aft: row.portes,
-        pvp_recomendado: row.precio, margen_pct: row.margenPct,
-        es_marca_prioritaria: o.esPrioritaria, es_candidato_complementario: o.esComplementaria,
-        score: o.score, motivo: o.motivo
+        ref: row.ref, ean: row.ean, marca: row.marca, descripcion: row.descripcion, categoria: row.categoria_nombre,
+        stock: row.stock, coste: row.coste, portes: row.portes,
+        precio: row.precio, margenPct: row.margenPct,
+        esPrioritaria: o.esPrioritaria, esComplementaria: o.esComplementaria,
+        score: o.score, motivo: o.motivo, afinidad: o.afinidad, margen
       };
     });
 
+    const ranking = seleccionarRanking(calculados, {
+      maxPorCategoria: MAX_POR_CATEGORIA,
+      maxCandidatosTotal: MAX_CANDIDATOS_TOTAL,
+      filtroAfinidadActivo: FILTRO_AFINIDAD_ACTIVO
+    });
+
+    const resultados = ranking.map((c) => ({
+      ref: c.ref, ean: c.ean, marca: c.marca, descripcion: c.descripcion, categoria_nombre: c.categoria,
+      stock_aft: c.stock, coste: c.coste, portes_proveedor_aft: c.portes,
+      pvp_recomendado: c.precio, margen_pct: c.margenPct,
+      es_marca_prioritaria: c.esPrioritaria, es_candidato_complementario: c.esComplementaria,
+      score: c.score, motivo: c.motivo,
+      afinidad_clase: c.afinidad.clase, afinidad_motivo: c.afinidad.motivo,
+      margen_clasificacion: c.margen.tier, margen_prioridad_adicional: c.margen.prioridadAdicional,
+      estado_elegibilidad: c.estadoElegibilidad
+    }));
+
     await pool.query(`UPDATE oportunidades_runs SET fase = 'guardando' WHERE id = $1`, [runId]);
     const guardadas = await guardarResultadosEnLotes(resultados);
+    await registrarIncidenciasAfinidadAmbigua(ranking);
 
     await pool.query(
       `UPDATE oportunidades_runs SET status = 'success', finished_at = now(), fase = 'done',
@@ -151,6 +195,16 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
        WHERE id = $1`,
       [runId, guardadas, prioritarias, complementarias]
     );
+
+    // Fase 3 — snapshot diario, solo tras éxito confirmado. Reduce sobre
+    // el ranking ya calculado en memoria, sin volver a consultar nada; un
+    // fallo al escribirlo nunca bloquea ni revierte la ejecución.
+    try {
+      const totales = calcularTotalesOportunidades(ranking);
+      await snapshotsRepo.upsertOportunidadesSnapshot({ fecha: fechaMadrid(), runId, totales });
+    } catch (e) {
+      console.error(`[oportunidades] No se pudo escribir el snapshot diario (run ${runId}): ${e.message}`);
+    }
 
     return { runId, totalCandidatos: rows.length, guardados: guardadas, prioritarias, complementarias };
   } catch (e) {
@@ -162,4 +216,8 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
   }
 }
 
-module.exports = { ejecutarAnalisisOportunidades, calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX };
+module.exports = {
+  ejecutarAnalisisOportunidades, calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX,
+  seleccionarRanking, registrarIncidenciasAfinidadAmbigua,
+  MAX_POR_CATEGORIA, MAX_CANDIDATOS_TOTAL, FILTRO_AFINIDAD_ACTIVO
+};

@@ -139,11 +139,29 @@ CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,
   ref            TEXT,
   ean            TEXT,
-  tipo           TEXT NOT NULL,  -- 'ean_duplicado' | 'stock_negativo' | 'sin_correspondencia' | 'multiples_ubicaciones' | 'ubicacion_principal_no_encontrada'
+  tipo           TEXT NOT NULL,  -- 'ean_duplicado' | 'stock_negativo' | 'sin_correspondencia' | 'multiples_ubicaciones' | 'ubicacion_principal_no_encontrada' | 'afinidad_ambigua'
   detalle        TEXT,
   detectado_en   TIMESTAMPTZ NOT NULL DEFAULT now(),
   estado         TEXT NOT NULL DEFAULT 'pendiente'
 );
+
+-- Fase 2 — resolución de incidencias (independiente de las autorizaciones
+-- comerciales excepcionales de márgenes, ver clasificarMargen en
+-- src/domain/margen.js — no se mezclan en ninguna tabla ni campo). Hasta
+-- ahora ningún código avanzaba "estado" más allá de 'pendiente'; estas
+-- columnas permiten registrar quién y cómo se resolvió, sin tocar el
+-- significado de las columnas existentes.
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resuelto_por TEXT;
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resuelto_en TIMESTAMPTZ;
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resolucion TEXT;
+
+-- Deduplicación segura frente a ejecuciones simultáneas: un índice único
+-- parcial (no un "SELECT primero, INSERT después" en la app, que tiene
+-- condición de carrera) sobre las incidencias de afinidad ambigua todavía
+-- pendientes para la misma ref. Una vez resuelta (estado != 'pendiente'),
+-- el índice deja de aplicar y una nueva incidencia para esa ref sí se crea.
+CREATE UNIQUE INDEX IF NOT EXISTS incidencias_afinidad_ambigua_ref_pendiente_idx
+  ON incidencias (ref) WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente';
 
 CREATE TABLE IF NOT EXISTS sync_lock (
   lock_key    TEXT PRIMARY KEY,
@@ -410,6 +428,18 @@ CREATE TABLE IF NOT EXISTS oportunidades_resultados (
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS oportunidades_run_id INTEGER;
 
+-- Fase 2 — afinidad comercial y clasificación de margen (ver
+-- src/domain/afinidad.js y src/domain/margen.js): columnas puramente
+-- aditivas, informativas. "estado_elegibilidad" nunca decide qué se
+-- guarda (eso lo decide seleccionarRanking en src/domain/oportunidades.js,
+-- pero TODOS los candidatos válidos se persisten, nunca solo los
+-- recomendados — "No recortes el conjunto antes de guardarlo").
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS afinidad_clase TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS afinidad_motivo TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS margen_clasificacion TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS margen_prioridad_adicional BOOLEAN DEFAULT false;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS estado_elegibilidad TEXT; -- 'recomendada' | 'excedente_categoria' | 'excedente_total' | 'fuera_de_foco' | 'ambigua_revision'
+
 -- Agente 5 — Demanda y SEO. Genera candidatos de keyword a partir del
 -- catálogo real (marca + categoría + descripción) para las oportunidades
 -- ya detectadas por el Agente 4, y consulta volumen/competencia REAL solo
@@ -493,3 +523,131 @@ CREATE TABLE IF NOT EXISTS fichas_borradores (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS fichas_run_id INTEGER;
+
+-- Fase 3 — afinidad persistente: una decisión humana sobre una categoría
+-- (ver src/domain/afinidadResolucion.js, src/usecases/resolverAfinidad.js)
+-- prevalece sobre la clasificación automática mientras esté 'activa', y
+-- nunca se pierde: "modificar" una decisión revoca la anterior y crea una
+-- fila nueva (nunca se sobrescribe un campo in situ), así el historial
+-- completo queda siempre consultable. El índice único parcial garantiza
+-- que solo pueda existir una resolución 'activa' por categoría a la vez,
+-- de forma segura frente a ejecuciones simultáneas (mismo patrón que el
+-- índice de incidencias.afinidad_ambigua de fase 2).
+CREATE TABLE IF NOT EXISTS afinidad_categorias_resueltas (
+  id                     SERIAL PRIMARY KEY,
+  categoria_normalizada  TEXT NOT NULL,
+  categoria_original     TEXT,
+  clase                  TEXT NOT NULL,  -- 'principal' | 'complementaria' | 'estacional' | 'fuera_de_foco' (nunca 'ambigua')
+  motivo                 TEXT NOT NULL,
+  estado                 TEXT NOT NULL DEFAULT 'activa',  -- 'activa' | 'revocada'
+  resuelto_por           TEXT NOT NULL,
+  resuelto_en            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revocado_por           TEXT,
+  revocado_en            TIMESTAMPTZ,
+  revocado_motivo        TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS afinidad_categorias_resueltas_activa_idx
+  ON afinidad_categorias_resueltas (categoria_normalizada) WHERE estado = 'activa';
+CREATE INDEX IF NOT EXISTS idx_afinidad_categorias_resueltas_categoria
+  ON afinidad_categorias_resueltas (categoria_normalizada);
+
+-- categoria_normalizada en incidencias (solo para tipo='afinidad_ambigua')
+-- permite cerrar en bloque todas las incidencias pendientes de una
+-- categoría en el momento en que se resuelve, sin tener que parsear el
+-- texto libre de "detalle". No se usa para ningún otro tipo de incidencia.
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS categoria_normalizada TEXT;
+CREATE INDEX IF NOT EXISTS idx_incidencias_categoria_normalizada
+  ON incidencias (categoria_normalizada) WHERE tipo = 'afinidad_ambigua';
+
+-- Fase 3 — snapshots diarios para los gráficos evolutivos (ver
+-- src/domain/fecha.js, src/repositories/snapshotsRepo.js). Una fila por
+-- día de calendario en hora de Madrid ("fecha" PRIMARY KEY): con varias
+-- ejecuciones el mismo día, cada escritura hace UPSERT sobre esa misma
+-- fila, así que el snapshot del día refleja siempre la ÚLTIMA ejecución
+-- CORRECTA de ese día — nunca una ejecución fallida (solo se escribe tras
+-- status='success' del run de origen) y nunca se pueden duplicar filas
+-- (el PRIMARY KEY lo impide estructuralmente, no una comprobación de la
+-- aplicación). "run_id" + "generado_en" dan procedencia verificable: de
+-- qué ejecución exacta salieron esos números y cuándo se escribieron. No
+-- hay backfill: estas tablas arrancan vacías y solo crecen hacia delante
+-- desde que este código empieza a ejecutarse — no se inventa ningún
+-- histórico anterior.
+CREATE TABLE IF NOT EXISTS stock_snapshots_diarios (
+  fecha            DATE PRIMARY KEY,
+  run_id           INTEGER,
+  total_sku        INTEGER,
+  matched          INTEGER,
+  con_diferencia   INTEGER,
+  a_cero           INTEGER,
+  sin_cambio       INTEGER,
+  generado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oportunidades_snapshots_diarios (
+  fecha                         DATE PRIMARY KEY,
+  run_id                        INTEGER,
+  total_candidatos              INTEGER,
+  recomendadas                  INTEGER,
+  excedente_categoria           INTEGER,
+  excedente_total               INTEGER,
+  afinidad_principal            INTEGER,
+  afinidad_complementaria       INTEGER,
+  afinidad_estacional           INTEGER,
+  afinidad_ambigua              INTEGER,
+  afinidad_fuera_de_foco        INTEGER,
+  margen_autorizacion_excepcional INTEGER,
+  margen_revision_comercial     INTEGER,
+  margen_apto_evaluacion        INTEGER,
+  margen_sin_dato               INTEGER,
+  generado_en                   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS rentabilidad_snapshots_diarios (
+  fecha              DATE PRIMARY KEY,
+  run_id             INTEGER,
+  en_perdida         INTEGER,
+  margen_bajo        INTEGER,
+  datos_incompletos  INTEGER,
+  total_evaluados    INTEGER,
+  generado_en        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Fase 3 — Aprobaciones. Autorizaciones comerciales excepcionales para
+-- productos con margen <10% (clasificarMargen -> 'autorizacion_excepcional',
+-- ver src/domain/margen.js). Mecanismo DELIBERADAMENTE separado de
+-- afinidad_categorias_resueltas: ninguna tabla ni campo se comparte entre
+-- "resolver una categoría de afinidad ambigua" y "autorizar un margen
+-- bajo" — son dos decisiones comerciales distintas, con dueños distintos.
+-- Append-only con historial: igual que afinidad_categorias_resueltas,
+-- "decidir de nuevo" sobre la misma ref crea una fila nueva en vez de
+-- sobrescribir la anterior; el índice único parcial garantiza una sola
+-- decisión 'vigente' a la vez por referencia.
+CREATE TABLE IF NOT EXISTS autorizaciones_margen (
+  id             SERIAL PRIMARY KEY,
+  ref            TEXT NOT NULL,
+  margen_pct     NUMERIC,
+  estado         TEXT NOT NULL,  -- 'autorizada' | 'rechazada'
+  decidido_por   TEXT NOT NULL,
+  decidido_en    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  motivo         TEXT NOT NULL,
+  vigente        BOOLEAN NOT NULL DEFAULT true
+);
+CREATE UNIQUE INDEX IF NOT EXISTS autorizaciones_margen_vigente_idx
+  ON autorizaciones_margen (ref) WHERE vigente = true;
+
+-- Registro de auditoría de TODAS las acciones de escritura de
+-- Aprobaciones (resolver/revocar afinidad, autorizar/rechazar margen) —
+-- qué se pidió, quién lo pidió, si se aplicó o se denegó por falta de
+-- permiso, y por qué. Nunca se borra ni se edita una fila existente.
+CREATE TABLE IF NOT EXISTS auditoria_acciones (
+  id           SERIAL PRIMARY KEY,
+  usuario      TEXT NOT NULL,
+  accion       TEXT NOT NULL,   -- 'afinidad.resolver' | 'afinidad.revocar' | 'margen.autorizar' | 'margen.rechazar' | ...
+  entidad      TEXT,            -- p.ej. 'categoria' | 'ref'
+  entidad_id   TEXT,            -- p.ej. la categoría normalizada, o la ref
+  resultado    TEXT NOT NULL,   -- 'aplicado' | 'denegado' | 'error'
+  detalle      JSONB,
+  creado_en    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_creado_en ON auditoria_acciones (creado_en);
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_usuario ON auditoria_acciones (usuario);

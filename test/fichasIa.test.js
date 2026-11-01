@@ -43,6 +43,44 @@ test('validarCalidad: sin keywords_seo no pasa', () => {
   assert.match(r.motivo, /sin keywords_seo/);
 });
 
+// --- Características adicionales (caracterización previa a mover la
+// función a src/domain/, para detectar cualquier cambio de comportamiento
+// en el traslado) ---
+
+test('[caracterización] título demasiado largo (>70) falla', () => {
+  const r = validarCalidad(ROW, { ...FICHA_VALIDA, titulo: 'T'.repeat(71) });
+  assert.equal(r.ok, false);
+  assert.match(r.motivo, /título fuera de rango \(71 caracteres/);
+});
+
+test('[caracterización] meta_titulo demasiado largo (>60) falla', () => {
+  const r = validarCalidad(ROW, { ...FICHA_VALIDA, meta_titulo: 'M'.repeat(61) });
+  assert.equal(r.ok, false);
+  assert.match(r.motivo, /meta_titulo demasiado largo \(61 caracteres/);
+});
+
+test('[caracterización] meta_descripcion fuera de rango (muy corta o muy larga) falla', () => {
+  const corta = validarCalidad(ROW, { ...FICHA_VALIDA, meta_descripcion: 'Corta' });
+  assert.equal(corta.ok, false);
+  assert.match(corta.motivo, /meta_descripcion fuera de rango \(5 caracteres/);
+
+  const larga = validarCalidad(ROW, { ...FICHA_VALIDA, meta_descripcion: 'M'.repeat(161) });
+  assert.equal(larga.ok, false);
+  assert.match(larga.motivo, /meta_descripcion fuera de rango \(161 caracteres/);
+});
+
+test('[caracterización] sin atributos (objeto) falla', () => {
+  const r = validarCalidad(ROW, { ...FICHA_VALIDA, atributos: null });
+  assert.equal(r.ok, false);
+  assert.match(r.motivo, /sin atributos/);
+});
+
+test('[caracterización] varios fallos simultáneos se concatenan con "; "', () => {
+  const r = validarCalidad(ROW, { ...FICHA_VALIDA, titulo: 'Corto', keywords_seo: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.motivo, /título fuera de rango.*; sin keywords_seo/);
+});
+
 test('hayProveedorIaConfigurado: refleja si ANTHROPIC_API_KEY está definida en este proceso', () => {
   // El valor se captura al cargar el módulo (ya requerido arriba), así que
   // solo comprobamos que la función devuelve un booleano coherente con el

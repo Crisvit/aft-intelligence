@@ -9,42 +9,24 @@
 const { pool } = require('./db');
 const aft = require('./aftClient');
 const shopify = require('./shopifyClient');
+const { calcularCosteYMargen, normalizar, round2 } = require('./domain/costeMargen');
+const { fechaMadrid } = require('./domain/fecha');
+const snapshotsRepo = require('./repositories/snapshotsRepo');
+// BRANDS_PRIORITARIAS decide el orden de las oportunidades comerciales
+// (esas marcas primero), no filtra nada por sí sola: el filtro de
+// inclusión (BRANDS/CATEGORIAS_INCLUIDAS) vive en src/domain/costeMargen.js,
+// un universo deliberadamente distinto. Se importa aquí solo para
+// mantener el mismo module.exports de siempre (BRANDS_PRIORITARIAS lo
+// sigue pidiendo src/oportunidades.js vía require('./sync')) — su
+// definición real está junto a esMarcaPrioritaria, su único consumidor
+// real, en src/domain/oportunidades.js.
+const { BRANDS_PRIORITARIAS } = require('./domain/oportunidades');
 
-// Listas configurables por entorno (CSV), sin tocar el código para
-// ajustarlas — si la variable no está definida, se usa el valor de
-// siempre. BRANDS_PRIORITARIAS decide el orden de las oportunidades
-// comerciales (esas marcas primero), no filtra nada por sí sola: el filtro
-// de inclusión sigue siendo BRANDS completo.
-function listaDesdeEnv(nombreEnv, porDefecto) {
-  const valor = process.env[nombreEnv];
-  if (!valor) return porDefecto;
-  return valor.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
-}
-const BRANDS = listaDesdeEnv('AFT_BRANDS', ['WOLFPACK', 'PAPILLON', 'SATURNIA', 'MAURER', 'SAMURAI', 'YAMATO']);
-const BRANDS_PRIORITARIAS = listaDesdeEnv('AFT_BRANDS_PRIORITARIAS', ['WOLFPACK', 'SAMURAI', 'MAURER', 'PAPILLON', 'SATURNIA']);
-const CATEGORIAS_INCLUIDAS = listaDesdeEnv('AFT_CATEGORIAS_INCLUIDAS', [
-  'HERRAMIENTA', 'ELECTROPORTATIL', 'AMOLADORA', 'TALADRO', 'SIERRA', 'MOTOSIERRA',
-  'DESBROZADOR', 'HIDROLIMPIADORA', 'COMPRESOR', 'GENERADOR', 'SOLDAR',
-  'DISCO DE CORTE', 'DISCO ABRASIVO', 'LIJA', 'BROCA', 'LLAVE', 'DESTORNILLADOR',
-  'PODA', 'NIVEL', 'MANGUERA', 'RIEGO', 'BOMBA DE AGUA', 'MALLA DE SOMBREO',
-  'BOTA', 'ROPA DE TRABAJO'
-]);
 // Stock mínimo en AFT para que una referencia no encontrada en Shopify
 // cuente como oportunidad real (evita proponer productos sin existencias).
 const STOCK_MINIMO_OPORTUNIDAD = Number(process.env.AFT_STOCK_MINIMO_OPORTUNIDAD) || 1;
-const FREE_SHIPPING_THRESHOLD = 30;
-const SHIPPING_HERRAMITIENDA = 4.41;
-const IVA_RECARGO_MAP = { 21: 5.2, 10: 1.4, 4: 0.5 };
 const MAIN_LOCATION_ID = process.env.SHOPIFY_MAIN_LOCATION_ID || 'gid://shopify/Location/102229836040';
 const SHOPIFY_PAGE_SIZE = Number(process.env.SHOPIFY_VARIANTS_PAGE_SIZE) || 25;
-
-function normalizar(s) {
-  return String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-}
-
-function round2(n) {
-  return Math.round(n * 100) / 100;
-}
 
 const BATCH_SIZE = 500;
 
@@ -275,6 +257,9 @@ async function ingestAft(runId) {
 
 // ---------------------------------------------------------------------------
 // 2. Coste real (IVA + recargo de equivalencia + portes) por referencia AFT.
+// calcularCosteYMargen vive ahora en src/domain/costeMargen.js (fase 1 de
+// la refactorización, sin cambiar su comportamiento) — aquí solo queda su
+// uso, sin duplicar la regla.
 //
 // Dos vistas sobre el mismo cálculo, a propósito separadas:
 // - getTodasLasReferenciasConCoste(): TODAS las referencias con stock/precio
@@ -287,34 +272,6 @@ async function ingestAft(runId) {
 //   mismo resultado que antes de este cambio — no se ha tocado su
 //   comportamiento ni su forma de datos.
 // ---------------------------------------------------------------------------
-function calcularCosteYMargen(d) {
-  const stock = Number(d.stock || 0);
-  const costoBase = Number(d.costo || 0);
-  const pvpSinIva = Number(d.pvp_sin_iva || 0);
-  const ivaRate = Number(d.por_iva || 0);
-  const recargoRate = IVA_RECARGO_MAP[ivaRate];
-  const recargoDesconocido = recargoRate === undefined;
-  const recargoAplicado = recargoDesconocido ? 0 : recargoRate;
-  const ivaImporte = round2(costoBase * (ivaRate / 100));
-  const recargoImporte = round2(costoBase * (recargoAplicado / 100));
-  const precioVentaAFT = round2(pvpSinIva * (1 + ivaRate / 100));
-  const transporteHerramitienda = precioVentaAFT >= FREE_SHIPPING_THRESHOLD ? SHIPPING_HERRAMITIENDA : 0;
-  const costeDesembolsado = round2(costoBase + ivaImporte + recargoImporte);
-  const costeParaMargen = round2(costeDesembolsado + transporteHerramitienda);
-
-  const marcaOk = BRANDS.some((m) => normalizar(d.marca).indexOf(m) !== -1);
-  const catOk = CATEGORIAS_INCLUIDAS.some((p) => normalizar(d.categoria_nombre).indexOf(p) !== -1);
-
-  return {
-    ref: d.ref, ean: d.ean, marca: d.marca, descripcion: d.descripcion,
-    stock, stockCero: stock === 0, stockNegativo: stock < 0,
-    ivaRate, recargoAplicado, recargoDesconocido,
-    costeBase: costoBase, ivaImporte, recargoImporte, transporteHerramitienda,
-    costeDesembolsado, costeParaMargen, precioVentaAFT,
-    esOportunidadComercial: marcaOk && catOk
-  };
-}
-
 async function getTodasLasReferenciasConCoste() {
   const { rows } = await pool.query(`
     SELECT c.ref, c.ean, c.marca, c.descripcion_corta AS descripcion, c.categoria_nombre,
@@ -718,6 +675,19 @@ async function runInventorySync(existingRunId) {
        WHERE id = $1`,
       [runId, candidatos.length, counters.matched, counters.cambiarian, counters.aCero, counters.sinCambio, counters.incidencias, counters.noEncontrados]
     );
+
+    // Fase 3 — snapshot diario para los gráficos evolutivos. Solo se
+    // escribe aquí, tras un éxito confirmado (nunca sobre un error, ver
+    // el catch de abajo) — y un fallo al escribirlo nunca revierte ni
+    // bloquea la sincronización que ya terminó bien.
+    try {
+      await snapshotsRepo.upsertStockSnapshot({
+        fecha: fechaMadrid(), runId, totalSku: candidatos.length,
+        matched: counters.matched, conDiferencia: counters.cambiarian, aCero: counters.aCero, sinCambio: counters.sinCambio
+      });
+    } catch (e) {
+      console.error(`[sync] No se pudo escribir el snapshot diario de stock (run ${runId}): ${e.message}`);
+    }
 
     return {
       runId, totalCandidatos: candidatos.length,

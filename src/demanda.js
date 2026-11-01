@@ -25,6 +25,7 @@
 // y revisar que los nombres de campo (search_volume, competition) siguen
 // vigentes en su API.
 const { pool } = require('./db');
+const { generarCandidatosDesdeCatalogo } = require('./domain/demanda');
 
 const DATAFORSEO_LOGIN = process.env.DATAFORSEO_LOGIN || '';
 const DATAFORSEO_PASSWORD = process.env.DATAFORSEO_PASSWORD || '';
@@ -39,19 +40,6 @@ function hayIntegracionConfigurada() {
   return !!(DATAFORSEO_LOGIN && DATAFORSEO_PASSWORD);
 }
 
-// Candidatos derivados literalmente del catálogo real — nunca generados
-// por un modelo de IA, nunca con un volumen o tendencia inventados. Solo
-// combinaciones simples y defendibles de datos que ya existen en hmt-db.
-function generarCandidatosDesdeCatalogo(row) {
-  const candidatos = new Set();
-  const marca = String(row.marca || '').trim();
-  const categoria = String(row.categoria_nombre || '').trim();
-  const descripcion = String(row.descripcion || '').trim();
-  if (marca && categoria) candidatos.add(`${marca} ${categoria}`.toLowerCase());
-  if (descripcion) candidatos.add(descripcion.toLowerCase());
-  if (marca && descripcion) candidatos.add(`${marca} ${descripcion}`.toLowerCase());
-  return [...candidatos].filter(Boolean);
-}
 
 // Llamada real a DataForSEO (keywords_data/google_ads/search_volume/live).
 // Lanza si la API responde con error — quien llama decide cómo degradar.

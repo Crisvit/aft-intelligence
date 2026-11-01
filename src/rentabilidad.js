@@ -11,6 +11,8 @@
 // propio cuando AFT ya cobra el suyo (evita duplicarlo).
 const { pool } = require('./db');
 const { calcularCosteYMargen, normalizar, round2 } = require('./sync');
+const { fechaMadrid } = require('./domain/fecha');
+const snapshotsRepo = require('./repositories/snapshotsRepo');
 
 const MARGEN_BAJO_PCT = Number(process.env.RENTABILIDAD_MARGEN_BAJO_PCT) || 15;
 const DIFERENCIA_COSTE_ALERTA_PCT = Number(process.env.RENTABILIDAD_DIFERENCIA_COSTE_PCT) || 20;
@@ -331,6 +333,17 @@ async function ejecutarAnalisisRentabilidad(existingRunId) {
        WHERE id = $1`,
       [runId, guardadas, enPerdida, margenBajo, diferenciaCoste, alertasTotal]
     );
+
+    // Fase 3 — snapshot diario, solo tras éxito confirmado; un fallo al
+    // escribirlo nunca bloquea ni revierte el análisis de rentabilidad.
+    try {
+      await snapshotsRepo.upsertRentabilidadSnapshot({
+        fecha: fechaMadrid(), runId, enPerdida, margenBajo,
+        datosIncompletos: datosIncompletosCount, totalEvaluados: rows.length
+      });
+    } catch (e) {
+      console.error(`[rentabilidad] No se pudo escribir el snapshot diario (run ${runId}): ${e.message}`);
+    }
 
     return { runId, analizados: rows.length, guardados: guardadas, enPerdida, margenBajo, diferenciaCoste, datosIncompletos: datosIncompletosCount, alertasTotal };
   } catch (e) {

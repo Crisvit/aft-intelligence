@@ -30,7 +30,9 @@ function buildDashboardHtml({
   demandaConectada,
   ultimaFichas,
   fichasBorradores,
-  iaConectada
+  iaConectada,
+  graficosData,
+  aprobacionesData
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -43,59 +45,14 @@ const repoBadge = repoEsDryRun
   ? '<span class="badge badge-off" style="background:#FFFBEB;color:#B45309;">DRY RUN — no escribe en Shopify</span>'
   : '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">ESCRITURA REAL ACTIVA</span>';
 
-function esc(s){ return String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function eur(n){ return (n === undefined || n === null) ? '—' : Number(n).toFixed(2) + '€'; }
-function pct(n){ return (n === undefined || n === null) ? '—' : Number(n).toFixed(1) + '%'; }
-function num(n){ return (n === undefined || n === null) ? '—' : n; }
-// \b\w solo reconoce límites de palabra ASCII, así que con una vocal con
-// tilde (í, á, ó...) rompía el conteo de "inicio de palabra" y capitalizaba
-// también la letra siguiente (p. ej. "Batería" -> "BateríA"). \p{L} con
-// flag /u es Unicode-aware y evita ese error de presentación.
-function titleCase(s){ return String(s||'').toLowerCase().replace(/(^|[\s\-/.])(\p{L})/gu, (m, sep, letra) => sep + letra.toUpperCase()); }
-function pl(n, singular, plural){ return n + ' ' + (n === 1 ? singular : plural); }
+// Fase 3 — formateadores y componentes puros ya extraídos a
+// src/views/helpers.js (sin cambiar su comportamiento — ver
+// test/buildDashboardHtml.characterization.test.js).
+const { esc, eur, pct, num, titleCase, pl, tiempoRelativo, icon, copiarReferenciaBtn } = require('./views/helpers');
+const { renderOportunidadesSection } = require('./views/oportunidadesView');
+const { renderGraficosSection } = require('./views/graficosView');
+const { renderAprobacionesSection } = require('./views/aprobacionesView');
 
-function tiempoRelativo(iso){
-  if (!iso) return '—';
-  const fecha = new Date(iso);
-  const ahora = new Date();
-  const diffMin = Math.floor((ahora - fecha) / 60000);
-  if (diffMin < 1) return 'Ahora mismo';
-  if (diffMin < 60) return 'hace ' + diffMin + ' min';
-  const esHoy = fecha.toDateString() === ahora.toDateString();
-  const ayer = new Date(ahora); ayer.setDate(ayer.getDate() - 1);
-  const esAyer = fecha.toDateString() === ayer.toDateString();
-  const hora = fecha.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-  if (esHoy) return hora;
-  if (esAyer) return 'Ayer, ' + hora;
-  return fecha.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }) + ', ' + hora;
-}
-
-const ICON = {
-  home: '<path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/>',
-  sparkles: '<path d="M12 3v4M12 17v4M5 12H3M8 8 5.5 5.5M8 16l-2.5 2.5M16 8l2.5-2.5M16 16l2.5 2.5M21 12h-2"/><circle cx="12" cy="12" r="2.5"/>',
-  box: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
-  layers: '<path d="M12 3 2 8l10 5 10-5z"/><path d="M2 13l10 5 10-5M2 16l10 5 10-5"/>',
-  check: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
-  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
-  plug: '<path d="M12 22v-5M9 8V2M15 8V2M18 8a2 2 0 0 1 2 2v2a8 8 0 0 1-8 8 8 8 0 0 1-8-8v-2a2 2 0 0 1 2-2z"/>',
-  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
-  alertTri: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
-  packageX: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8M8.5 5.5l7 4"/>',
-  chevron: '<path d="M9 18l6-6-6-6"/>',
-  circle: '<circle cx="12" cy="12" r="10"/>',
-  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-  fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>'
-};
-function icon(name, size, color){ return '<svg width="'+(size||16)+'" height="'+(size||16)+'" viewBox="0 0 24 24" fill="none" stroke="'+(color||'currentColor')+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>'; }
-
-// AFT no tiene (todavía) una URL de producto pública confirmada — no se
-// inventa una (eso es lo que daba enlaces en blanco antes). Mientras no
-// exista una URL real verificada, el único enlace a AFT que se ofrece es
-// "Copiar referencia" para buscarla a mano en el ERP/portal de AFT.
-function copiarReferenciaBtn(ref){
-  return '<button type="button" class="sec-link" style="background:none;border:none;cursor:pointer;padding:0;font:inherit;" onclick="copiarReferencia(this,\'' + esc(ref) + '\')" title="Copiar la referencia AFT al portapapeles">' +
-    icon('copy', 11) + ' Copiar ref. AFT</button>';
-}
 // URL del producto en el admin de Shopify — construida SOLO a partir del
 // shopify_product_id real (el ID del producto padre, leído de la API vía
 // product.id en la consulta de variantes), nunca del id de la variante:
@@ -289,34 +246,10 @@ const previsualizacionHtml =
   '<div id="previsualizacionContenedor" style="margin-top:14px;"></div>';
 
 // --- Página Oportunidades: datos reales, sin ningún score inventado.
-//     Ranking explicable: prioridad de marca (Wolfpack/Samurai/Maurer/
-//     Papillon/Saturnia, configurable) primero, margen real/proyectado
-//     después — nunca una puntuación opaca. ---
-const marcasOportunidad = Array.from(new Set(oportunidadRows.map(c => titleCase(c.marca || '')).filter(Boolean))).sort();
-function filaOportunidad(c){
-  const margen = c.margenPct != null ? Number(c.margenPct) : null;
-  return '<tr data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '">' +
-    '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(c.descripcion || c.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(c.ref) + (c.categoria_nombre ? ' · ' + esc(titleCase(c.categoria_nombre)) : '') + '</div></td>' +
-    '<td data-label="Marca">' + esc(titleCase(c.marca || '')) + (c.esPrioritaria ? ' <span class="badge badge-ok">Prioritaria</span>' : '') + (c.esComplementaria ? ' <span class="badge badge-off" style="background:#F5F3FF;color:#7C3AED;">Complementaria</span>' : '') + '</td>' +
-    '<td class="num" data-label="Stock AFT">' + num(c.stock) + '</td>' +
-    '<td class="num" data-label="Coste">' + eur(c.coste) + '</td>' +
-    '<td class="num" data-label="PVP recomendado">' + eur(c.precio) + '</td>' +
-    '<td class="num ok" data-label="Margen">' + (margen != null ? pct(margen) : '—') + '</td>' +
-    '<td class="num" data-label="Score">' + (c.score != null ? Number(c.score).toFixed(0) + '/100' : '—') + '</td>' +
-    '<td data-label="Enlaces">' + copiarReferenciaBtn(c.ref) + '</td>' +
-    '</tr>' +
-    '<tr class="row-detalle" data-marca="' + esc(titleCase(c.marca || '')) + '" data-margen="' + (margen != null ? margen : '') + '"><td colspan="8" style="font-size:11px;color:var(--sub);padding-top:0;padding-bottom:10px;">' + esc(c.motivo || '') + '</td></tr>';
-}
-const oportunidadesHtml = oportunidadRows.length
-  ? '<div class="filterbar">' +
-      '<select id="filtroMarca" class="filter-select" onchange="filtrarOportunidades()"><option value="">Todas las marcas</option>' + marcasOportunidad.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('') + '</select>' +
-      '<select id="filtroMargen" class="filter-select" onchange="filtrarOportunidades()"><option value="0">Cualquier margen</option><option value="20">20%+</option><option value="30">30%+</option><option value="40">40%+</option></select>' +
-    '</div>' +
-    '<div class="table-note">Mostrando ' + pl(oportunidadRows.length, 'oportunidad', 'oportunidades') + ' del último análisis del Agente 4' + (ultimaOportunidades ? ' (' + tiempoRelativo(ultimaOportunidades.finished_at) + ')' : '') + ' — referencias de tus marcas/categorías comerciales con al menos ' + pl(stockMinimoOportunidad || 1, 'unidad', 'unidades') + ' en stock AFT que la última sincronización no encontró en Shopify. Puntuación explicable (ver motivo bajo cada fila): marca prioritaria + margen proyectado + stock — nunca una señal de demanda externa inventada.</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca</th><th>Stock AFT</th><th>Coste</th><th>PVP recomendado</th><th>Margen</th><th>Score</th><th>Enlaces</th></tr></thead><tbody id="tablaOportunidadesBody">' +
-    oportunidadRows.map(filaOportunidad).join('') +
-    '</tbody></table></div>'
-  : '<div class="empty-state">Ninguna referencia de tus marcas/categorías comerciales está pendiente de añadir a Shopify ahora mismo.</div>';
+//     Extraída a src/views/oportunidadesView.js (fase 3) — ver ese
+//     archivo para el detalle de las columnas de afinidad/margen/
+//     elegibilidad añadidas en el mismo cambio. ---
+const oportunidadesHtml = renderOportunidadesSection(oportunidadRows, { ultimaOportunidades, stockMinimoOportunidad });
 
 // --- Demanda y SEO (Agente 5): keywords candidatas por referencia ---
 function filaDemanda(d){
@@ -662,8 +595,22 @@ const integracionesHtml =
     '<div class="integ-sub" style="margin-top:4px;">Estas funciones existían en el panel original (de otros agentes, fuera de este repositorio) y todavía no se han conectado a una fuente de datos real — el panel no simula sus resultados.</div>' +
   '</div>' : '');
 
+// --- Página Gráficos (fase 3) ---
+const graficosDataSegura = graficosData || {
+  diasDisponibles: [7, 30, 90], primeraFechaSnapshot: null,
+  historialSync: [], historialDemanda: [], ejecucionesPorDia: [],
+  stockSnapshots: [], oportunidadesSnapshots: [], rentabilidadSnapshots: []
+};
+const { html: graficosHtml, script: graficosScript } = renderGraficosSection(graficosDataSegura);
+
+// --- Página Aprobaciones (fase 3) ---
+const aprobacionesDataSegura = aprobacionesData || { incidenciasAgrupadas: [], autorizacionesPendientes: [], historialAfinidad: [], historialMargen: [] };
+const { html: aprobacionesHtml, script: aprobacionesScript } = renderAprobacionesSection(aprobacionesDataSegura);
+
 // --- HTML completo ---
-const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title><style>' +
+const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title>' +
+'<script src="/vendor/chartjs-4.4.4/chart.umd.js"></script>' +
+'<style>' +
 "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');" +
 '*{box-sizing:border-box;margin:0;padding:0;}' +
 ':root{--bg:#F7F8FA;--card:#FFFFFF;--border:#E5E7EB;--ink:#111827;--sub:#667085;--brand:#087F78;--brand-dark:#066b65;}' +
@@ -759,8 +706,10 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="sb-logo"><div class="sb-logo-mark">H</div><div><div class="sb-brand">HERRAMITIENDA</div><div class="sb-sub">AFT Intelligence</div></div><button class="hamburger" onclick="toggleNav()" aria-label="Abrir menú">☰</button></div>' +
 '<div class="sb-nav" id="sbNav">' +
 '<a class="sb-link active" data-page="inicio" onclick="ir(this)">' + icon('home', 17) + '<span>Inicio</span></a>' +
+'<a class="sb-link" data-page="graficos" onclick="ir(this)">' + icon('activity', 17) + '<span>Gráficos</span></a>' +
 '<a class="sb-link" data-page="coincidencias" onclick="ir(this)">' + icon('check', 17) + '<span>Coincidencias</span></a>' +
 '<a class="sb-link" data-page="oportunidades" onclick="ir(this)">' + icon('sparkles', 17) + '<span>Oportunidades</span></a>' +
+'<a class="sb-link" data-page="aprobaciones" onclick="ir(this)">' + icon('check', 17) + '<span>Aprobaciones</span></a>' +
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
 '<a class="sb-link" data-page="rentabilidad" onclick="ir(this)">' + icon('alertTri', 17) + '<span>Rentabilidad</span></a>' +
 '<a class="sb-link" data-page="actividad" onclick="ir(this)">' + icon('activity', 17) + '<span>Actividad</span></a>' +
@@ -786,9 +735,13 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '</div>' +
 '</div>' +
 
+'<div class="page" id="page-graficos"><div class="pagetitle">Gráficos evolutivos</div>' + graficosHtml + '</div>' +
+
 '<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
 
 '<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
+
+'<div class="page" id="page-aprobaciones"><div class="pagetitle">Aprobaciones</div><p style="font-size:11.5px;color:var(--sub);margin:-8px 0 16px;">Tres flujos de revisión humana, completamente separados entre sí — ninguno publica en Shopify.</p>' + aprobacionesHtml + '</div>' +
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
@@ -806,11 +759,11 @@ fichasHtml +
 '<div class="page" id="page-configuracion"><div class="pagetitle">Configuración</div><div class="empty-state">Próximamente.</div></div>' +
 
 '</main><script>' +
-'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");}' +
+'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");if(id==="graficos"&&window.hmtGraficosInit)window.hmtGraficosInit();}' +
 'function copiarReferencia(btn,ref){var original=btn.innerHTML;function ok(){btn.innerHTML="Copiado ✓";setTimeout(function(){btn.innerHTML=original;},1500);}function fallback(){try{var ta=document.createElement("textarea");ta.value=ref;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.focus();ta.select();document.execCommand("copy");document.body.removeChild(ta);ok();}catch(e){btn.innerHTML="Ref: "+ref;}}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ref).then(ok).catch(fallback);}else{fallback();}}' +
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
-'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;r.style.display=(okMarca&&okMargen)?"":"none";});}' +
+'function filtrarOportunidades(){var marca=document.getElementById("filtroMarca").value;var margen=parseFloat(document.getElementById("filtroMargen").value)||0;var estadoSel=document.getElementById("filtroEstadoOportunidad");var estado=estadoSel?estadoSel.value:"";var afinidadSel=document.getElementById("filtroAfinidadOportunidad");var afinidad=afinidadSel?afinidadSel.value:"";document.querySelectorAll("#tablaOportunidadesBody tr").forEach(function(r){var okMarca=!marca||r.dataset.marca===marca;var okMargen=(parseFloat(r.dataset.margen)||0)>=margen;var okEstado=!estado||r.dataset.estado===estado;var okAfinidad=!afinidad||r.dataset.afinidad===afinidad;r.style.display=(okMarca&&okMargen&&okEstado&&okAfinidad)?"":"none";});}' +
 'function filtrarProductos(){var q=document.getElementById("buscarProducto").value.toLowerCase();var proveedor=document.getElementById("filtroProveedorProducto").value;var vendor=document.getElementById("filtroVendorProducto").value;var estado=document.getElementById("filtroEstadoProducto").value;var disponibilidad=document.getElementById("filtroDisponibilidadProducto").value;var visibles=0;document.querySelectorAll("#tablaProductosBody tr").forEach(function(r){if(!r.dataset.nombre)return;var okTexto=r.dataset.nombre.indexOf(q)>-1;var okProveedor=!proveedor||r.dataset.proveedor===proveedor;var okVendor=!vendor||r.dataset.vendor===vendor;var okEstado=!estado||r.dataset.estado===estado;var okDisponibilidad=!disponibilidad||r.dataset.disponibilidad===disponibilidad;var match=okTexto&&okProveedor&&okVendor&&okEstado&&okDisponibilidad;r.style.display=match?"":"none";if(match)visibles++;});var total=document.querySelectorAll("#tablaProductosBody tr[data-nombre]").length;var c=document.getElementById("contadorProductos");if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" variante.":" variantes.");}' +
 'var aftPollTimer=null;' +
 'function pararPollAFT(){if(aftPollTimer){clearInterval(aftPollTimer);aftPollTimer=null;}}' +
@@ -860,7 +813,7 @@ fichasHtml +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollPipelineEstado(btn,out){pararPollPipeline();pipelinePollTimer=setInterval(function(){fetch("/api/pipeline-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFasePipeline(run);if(!run||run.status!=="running"){pararPollPipeline();btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("pipelineEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("pipelineEstadoTexto");if(txt)txt.textContent="Completo ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},3000);}' +
 'function ejecutarPipeline(btn){pararPollPipeline();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Ejecutando...";var out=document.getElementById("pipelineResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/pipeline-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollPipelineEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollPipelineEstado(btn,out);}else{btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
-'</script></body></html>';
+'</script><script>' + graficosScript + '</script><script>' + aprobacionesScript + '</script></body></html>';
 
 return html;
 }

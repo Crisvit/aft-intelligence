@@ -6,6 +6,7 @@
 // explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
@@ -18,6 +19,11 @@ const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
+const { obtenerGraficos } = require('./src/usecases/obtenerGraficos');
+const { resolverUsuarios, buscarUsuario, tienePermiso } = require('./src/domain/permisos');
+const resolverAfinidad = require('./src/usecases/resolverAfinidad');
+const autorizarMargen = require('./src/usecases/autorizarMargen');
+const { registrar: registrarAuditoria, listarRecientes: listarAuditoriaReciente } = require('./src/repositories/auditoriaRepo');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,12 +33,15 @@ const PORT = process.env.PORT || 3000;
 // write_inventory, vive exclusivamente en src/reposicion.js).
 const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').toLowerCase() === 'true';
 
-const DASHBOARD_USER = process.env.DASHBOARD_USER;
-const DASHBOARD_PASSWORD_HASH = process.env.DASHBOARD_PASSWORD_HASH;
+// Fase 3 — varios usuarios con roles distintos vía DASHBOARD_USUARIOS_JSON
+// (ver src/domain/permisos.js); sin esa variable, se mantiene el
+// comportamiento de siempre: un único usuario (DASHBOARD_USER/
+// DASHBOARD_PASSWORD_HASH) con todos los permisos.
+const DASHBOARD_USUARIOS = resolverUsuarios(process.env);
 
 function basicAuth(req, res, next) {
-  if (!DASHBOARD_USER || !DASHBOARD_PASSWORD_HASH) {
-    res.status(500).send('Faltan DASHBOARD_USER / DASHBOARD_PASSWORD_HASH en el entorno.');
+  if (!DASHBOARD_USUARIOS.length) {
+    res.status(500).send('Faltan credenciales del dashboard en el entorno (DASHBOARD_USER/DASHBOARD_PASSWORD_HASH, o DASHBOARD_USUARIOS_JSON).');
     return;
   }
   const header = req.headers.authorization || '';
@@ -45,18 +54,44 @@ function basicAuth(req, res, next) {
   const idx = decoded.indexOf(':');
   const user = decoded.slice(0, idx);
   const pass = decoded.slice(idx + 1);
-  if (user !== DASHBOARD_USER || !bcrypt.compareSync(pass, DASHBOARD_PASSWORD_HASH)) {
+  const usuario = buscarUsuario(DASHBOARD_USUARIOS, user);
+  if (!usuario || !bcrypt.compareSync(pass, usuario.passwordHash)) {
     res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
     return res.status(401).send('Credenciales incorrectas.');
   }
-  req.dashboardUser = user;
+  req.dashboardUser = usuario.usuario;
+  req.dashboardRoles = usuario.roles || [];
   next();
+}
+
+// Fase 3 — autorización por rol, SOBRE basicAuth (nunca la sustituye):
+// estar autenticado ya no basta para aprobar excepciones de margen o
+// resolver afinidad — hace falta el rol concreto. Quien no lo tiene
+// recibe 403 y la denegación queda en auditoria_acciones (ver cada
+// endpoint de Aprobaciones más abajo).
+function requireRole(rol) {
+  return function (req, res, next) {
+    if (!tienePermiso({ roles: req.dashboardRoles }, rol)) {
+      registrarAuditoria({
+        usuario: req.dashboardUser || 'desconocido', accion: 'permiso.denegado', entidad: 'ruta', entidadId: req.originalUrl,
+        resultado: 'denegado', detalle: { rolRequerido: rol, metodo: req.method }
+      });
+      return res.status(403).json({ ok: false, error: `Tu usuario no tiene el permiso "${rol}" para esta acción.` });
+    }
+    next();
+  };
 }
 
 app.use((req, res, next) => {
   res.set('X-Robots-Tag', 'noindex, nofollow');
   next();
 });
+
+// Fase 3 — Chart.js vendorizado (ver public/vendor/chartjs-4.4.4/README.md):
+// servido localmente, nunca desde un CDN externo en producción. Sin
+// autenticación propia (es un archivo público, sin datos) para no
+// complicar la carga de <script> con credenciales Basic Auth.
+app.use('/vendor', express.static(path.join(__dirname, 'public', 'vendor'), { maxAge: '30d', immutable: true }));
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
@@ -492,6 +527,91 @@ app.post('/api/fichas/:id/editar', basicAuth, express.json(), async (req, res) =
   }
 });
 
+// ---------------------------------------------------------------------------
+// Fase 3 — Aprobaciones. Dos flujos de resolución humana, completamente
+// separados (ni tabla ni campo compartido): afinidad ambigua
+// (src/usecases/resolverAfinidad.js) y excepciones comerciales de margen
+// <10% (src/usecases/autorizarMargen.js). Ninguno de los dos publica nada
+// en Shopify ni crea ninguna ficha — ver src/domain/margen.js y
+// src/domain/afinidad.js para lo que cada decisión SÍ y NO cambia.
+// Protegidos con basicAuth (autenticación) + requireRole (autorización:
+// no cualquier usuario autenticado puede aprobar) + validación de dominio
+// en el usecase + registro de auditoría (auditoria_acciones) en cada
+// intento, aplicado o denegado.
+// ---------------------------------------------------------------------------
+
+app.post('/api/aprobaciones/afinidad/resolver', basicAuth, requireRole('aprobar_afinidad'), express.json(), async (req, res) => {
+  const { categoria, clase, motivo } = req.body || {};
+  try {
+    const resultado = await resolverAfinidad.resolverCategoria({ categoria, clase, motivo, resueltoPor: req.dashboardUser });
+    if (!resultado.ok) return res.status(400).json({ ok: false, error: resultado.errores.join(' ') });
+    res.json({ ok: true, resolucion: resultado.resolucion });
+  } catch (e) {
+    console.error('[aprobaciones/afinidad/resolver] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/aprobaciones/afinidad/revocar', basicAuth, requireRole('aprobar_afinidad'), express.json(), async (req, res) => {
+  const { categoria, motivo } = req.body || {};
+  try {
+    const resultado = await resolverAfinidad.revocarCategoria({ categoria, revocadoPor: req.dashboardUser, revocadoMotivo: motivo });
+    if (!resultado.ok) return res.status(400).json({ ok: false, error: resultado.errores.join(' ') });
+    res.json({ ok: true, resolucion: resultado.resolucion });
+  } catch (e) {
+    console.error('[aprobaciones/afinidad/revocar] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Historial de una categoría — solo lectura, cualquier usuario
+// autenticado puede consultarlo (no hace falta el rol de aprobar).
+app.get('/api/aprobaciones/afinidad/historial', basicAuth, async (req, res) => {
+  try {
+    const historial = await resolverAfinidad.historialCategoria(req.query.categoria || '');
+    res.json({ ok: true, historial });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/aprobaciones/margen/:ref/autorizar', basicAuth, requireRole('aprobar_margen'), express.json(), async (req, res) => {
+  const { motivo, margenPct } = req.body || {};
+  try {
+    const resultado = await autorizarMargen.autorizarExcepcion({ ref: req.params.ref, margenPct, motivo, decididoPor: req.dashboardUser });
+    if (!resultado.ok) return res.status(400).json({ ok: false, error: resultado.errores.join(' ') });
+    res.json({ ok: true, autorizacion: resultado.autorizacion });
+  } catch (e) {
+    console.error('[aprobaciones/margen/autorizar] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/aprobaciones/margen/:ref/rechazar', basicAuth, requireRole('aprobar_margen'), express.json(), async (req, res) => {
+  const { motivo, margenPct } = req.body || {};
+  try {
+    const resultado = await autorizarMargen.rechazarExcepcion({ ref: req.params.ref, margenPct, motivo, decididoPor: req.dashboardUser });
+    if (!resultado.ok) return res.status(400).json({ ok: false, error: resultado.errores.join(' ') });
+    res.json({ ok: true, autorizacion: resultado.autorizacion });
+  } catch (e) {
+    console.error('[aprobaciones/margen/rechazar] Error:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Registro de auditoría — solo lectura, pensado para revisión por un
+// administrador; cualquier usuario autenticado puede verlo (es un
+// registro de lo ya ocurrido, no una acción).
+app.get('/api/aprobaciones/auditoria', basicAuth, async (req, res) => {
+  try {
+    const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 100, 1), 500);
+    const registros = await listarAuditoriaReciente(limite);
+    res.json({ ok: true, registros });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // Automatización (prioridad 2): encadena importación AFT -> sincronización
 // Shopify (solo lectura) -> análisis de rentabilidad, en ese orden, en
 // segundo plano. Cada etapa sigue usando su propia tabla de progreso —
@@ -634,12 +754,22 @@ app.get('/api/diff', basicAuth, async (req, res) => {
   });
 });
 
-let cache = { html: null, builtAt: 0 };
+// Fase 3 — IMPORTANTE: esta caché guarda los DATOS crudos (consultas a
+// hmt-db), nunca el HTML ya construido. El HTML depende del usuario que
+// lo pide (la página Aprobaciones oculta sus acciones según el rol de
+// req.dashboardRoles) — si se cacheara el HTML entero, la primera
+// petición "congelaría" su propio juego de botones durante 30s para
+// CUALQUIER otro usuario que cargue el dashboard en esa ventana,
+// filtrando acciones de un usuario con permisos a uno sin ellos (o al
+// revés). Los datos sí son iguales para todos, así que solo esos se
+// cachean; construir el HTML a partir de ellos es barato (sin I/O) y se
+// hace en cada petición, en app.get('/').
+let cache = { datos: null, builtAt: 0 };
 const CACHE_MS = 30 * 1000;
 
-async function renderDashboard() {
+async function obtenerDatosDashboard() {
   const now = Date.now();
-  if (cache.html && (now - cache.builtAt) < CACHE_MS) return cache.html;
+  if (cache.datos && (now - cache.builtAt) < CACHE_MS) return cache.datos;
 
   const { rows: ultimoSyncRows } = await pool.query(`SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1`);
   const ultimoSync = ultimoSyncRows[0] || null;
@@ -741,7 +871,10 @@ async function renderDashboard() {
     `SELECT ref, ean, marca, descripcion, categoria_nombre, stock_aft AS stock, coste,
             portes_proveedor_aft, pvp_recomendado AS precio, margen_pct AS "margenPct",
             es_marca_prioritaria AS "esPrioritaria", es_candidato_complementario AS "esComplementaria",
-            score, motivo
+            score, motivo,
+            afinidad_clase AS "afinidadClase", afinidad_motivo AS "afinidadMotivo",
+            margen_clasificacion AS "margenClasificacion", margen_prioridad_adicional AS "margenPrioridadAdicional",
+            estado_elegibilidad AS "estadoElegibilidad"
      FROM oportunidades_resultados
      ORDER BY score DESC NULLS LAST, margen_pct DESC NULLS LAST
      LIMIT 500`
@@ -797,7 +930,56 @@ async function renderDashboard() {
   // variable de entorno que usa shopifyClient.js para hablar con la API.
   const shopifyAdminStore = (process.env.SHOPIFY_SHOP || '').replace(/\.myshopify\.com$/i, '');
 
-  const html = buildDashboardHtml({
+  // Fase 3 — Gráficos: un fallo al leer los datos de gráficos nunca debe
+  // impedir que el resto del dashboard se muestre; se degrada a "sin
+  // datos" (el valor por defecto de buildDashboardHtml) en vez de romper
+  // toda la página.
+  let graficosData = null;
+  try {
+    graficosData = await obtenerGraficos();
+  } catch (e) {
+    console.error('[dashboard] No se pudieron cargar los datos de Gráficos:', e.message);
+  }
+
+  // Fase 3 — Aprobaciones: igual que Gráficos, un fallo aquí nunca debe
+  // romper el resto del dashboard.
+  let aprobacionesData = null;
+  try {
+    const { rows: incidenciasAgrupadas } = await pool.query(
+      `SELECT categoria_normalizada, (array_agg(detalle ORDER BY detectado_en))[1] AS categoria_original_detalle,
+              count(*)::int AS total_refs, min(detectado_en) AS detectado_en
+       FROM incidencias
+       WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente' AND categoria_normalizada IS NOT NULL
+       GROUP BY categoria_normalizada
+       ORDER BY min(detectado_en) ASC`
+    );
+    // La "categoría original" se extrae del texto de detalle (el motivo
+    // de clasificarAfinidadComercial siempre lo incluye entre comillas) —
+    // si no se puede extraer, se muestra la forma normalizada tal cual,
+    // nunca un valor inventado.
+    const incidenciasConCategoriaOriginal = incidenciasAgrupadas.map((g) => {
+      const m = /Categoría "([^"]*)"/.exec(g.categoria_original_detalle || '');
+      return { ...g, categoria_original: m ? m[1] : g.categoria_normalizada };
+    });
+
+    const { rows: autorizacionesPendientes } = await pool.query(
+      `SELECT o.ref, o.descripcion, o.marca, o.margen_pct, o.score
+       FROM oportunidades_resultados o
+       LEFT JOIN autorizaciones_margen a ON a.ref = o.ref AND a.vigente = true
+       WHERE o.margen_clasificacion = 'autorizacion_excepcional' AND a.id IS NULL
+       ORDER BY o.margen_pct ASC NULLS LAST
+       LIMIT 100`
+    );
+
+    const historialAfinidad = await resolverAfinidad.historialCompleto(50);
+    const historialMargen = await autorizarMargen.historialReciente(50);
+
+    aprobacionesData = { incidenciasAgrupadas: incidenciasConCategoriaOriginal, autorizacionesPendientes, historialAfinidad, historialMargen };
+  } catch (e) {
+    console.error('[dashboard] No se pudieron cargar los datos de Aprobaciones:', e.message);
+  }
+
+  const datos = {
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
     pvpComplementoMax: PVP_COMPLEMENTO_MAX,
@@ -809,16 +991,26 @@ async function renderDashboard() {
     ultimaDemanda, demandaResultados,
     demandaConectada: hayIntegracionDemandaConfigurada(),
     ultimaFichas, fichasBorradores,
-    iaConectada: hayProveedorIaConfigurado()
-  });
+    iaConectada: hayProveedorIaConfigurado(),
+    graficosData,
+    aprobacionesData
+  };
 
-  cache = { html, builtAt: now };
-  return html;
+  cache = { datos, builtAt: now };
+  return datos;
 }
 
 app.get('/', basicAuth, async (req, res) => {
   try {
-    const html = await renderDashboard();
+    const datos = await obtenerDatosDashboard();
+    // aprobacionesData.roles se añade aquí, FUERA de la caché compartida
+    // — son los roles del usuario que hace ESTA petición concreta
+    // (req.dashboardRoles, fijados por basicAuth), nunca los de quien
+    // disparó la última reconstrucción de la caché de datos.
+    const html = buildDashboardHtml({
+      ...datos,
+      aprobacionesData: datos.aprobacionesData ? { ...datos.aprobacionesData, roles: req.dashboardRoles || [] } : null
+    });
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (err) {
