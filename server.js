@@ -10,7 +10,7 @@ const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
-const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion } = require('./src/reposicion');
+const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, obtenerBloqueadosPorMotivo, obtenerUltimaReposicionEfectiva } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
@@ -683,6 +683,13 @@ async function renderDashboard() {
      ORDER BY detectado_en DESC LIMIT 200`
   );
 
+  // Última sincronización con escritura real confirmada (nunca una
+  // simulación) y desglose de referencias bloqueadas por motivo — para que
+  // el dashboard distinga "última ejecución" de "última vez que de verdad
+  // se actualizó algo en Shopify", y muestre qué está bloqueado y por qué.
+  const ultimaReposicionEfectiva = await obtenerUltimaReposicionEfectiva();
+  const reposicionBloqueados = await obtenerBloqueadosPorMotivo();
+
   // Productos que requieren atención: pérdida, margen bajo o datos
   // incompletos, de la última ejecución del agente de rentabilidad
   // (prioridad 1). Ordenados por riesgo: pérdida primero, luego datos
@@ -837,7 +844,7 @@ async function renderDashboard() {
     pvpComplementoMax: PVP_COMPLEMENTO_MAX,
     stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD,
     totalesCatalogo, shopifyAdminStore,
-    ultimaReposicion, reposicionEventos,
+    ultimaReposicion, reposicionEventos, ultimaReposicionEfectiva, reposicionBloqueados,
     shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED,
     ultimaOportunidades,
     ultimaDemanda, demandaResultados,

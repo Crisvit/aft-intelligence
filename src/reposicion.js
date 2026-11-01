@@ -13,6 +13,7 @@
 const { pool } = require('./db');
 const shopify = require('./shopifyClient');
 const shopifyWrite = require('./shopifyWriteClient');
+const { notificarFallo } = require('./alertas');
 
 const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').toLowerCase() === 'true';
 // Gate INDEPENDIENTE para la actualización controlada de una sola
@@ -36,6 +37,24 @@ function clasificarEvento(antes, nuevo) {
   if (antes <= 0 && nuevo > 0) return 'producto_recuperado_stock_cero_negativo';
   if (nuevo > antes) return 'reposicion_detectada';
   return 'correccion_a_la_baja';
+}
+
+// Clasifica el RESULTADO real de procesar un candidato — para contar. Pura,
+// depende solo de lo que procesarCandidato ya decidió (r.tipo/escrito/error),
+// nunca repite la clasificación del evento. El contador "actualizados" solo
+// debe subir cuando escrito===true (una escritura real confirmada en
+// Shopify); "simulado" es el cálculo en dry run, nunca se cuenta como
+// actualización real.
+//  - 'sin_cambios': el stock ya coincidía, no había nada que hacer.
+//  - 'error': la escritura (o su verificación previa en vivo) falló.
+//  - 'actualizado': escrito===true — hubo una escritura real en Shopify
+//    (verificada o no; eso lo registra aparte verificaciones_fallidas).
+//  - 'simulado': se calculó el cambio pero no se escribió (dry run).
+function clasificarResultado(r) {
+  if (r.tipo === 'sin_cambios') return 'sin_cambios';
+  if (r.error) return 'error';
+  if (r.escrito) return 'actualizado';
+  return 'simulado';
 }
 
 // stock_shopify_despues guarda siempre el valor objetivo (f.nuevo): lo ya
@@ -90,6 +109,13 @@ async function obtenerCandidatos(refFiltro) {
       AND stock_aft IS NOT NULL
       AND stock_aft >= 0
       ${filtroRef}
+    ORDER BY
+      -- Prioridad 2: AFT confirma 0 uds. y Shopify todavía la muestra como
+      -- disponible — el caso más urgente (cliente puede comprar algo sin
+      -- stock real) — va siempre primero, antes que cualquier otro caso.
+      (CASE WHEN stock_aft = 0 AND shopify_stock > 0 THEN 0 ELSE 1 END),
+      ABS(stock_aft - shopify_stock) DESC,
+      ref
   `, params);
   return rows;
 }
@@ -110,6 +136,51 @@ async function contarOmitidosPorAmbiguedad() {
   return rows[0].n;
 }
 
+// Desglose de las referencias bloqueadas por motivo — para mostrarlas en el
+// dashboard en vez de solo un total agregado. Los motivos NO son excluyentes
+// entre sí (una fila puede tener varios a la vez, p. ej. duplicado Y sin
+// inventory_item_id): cada número es "cuántas están bloqueadas AL MENOS por
+// este motivo", no una partición. Mismo universo base que contarOmitidosPorAmbiguedad().
+async function obtenerBloqueadosPorMotivo() {
+  const { rows } = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE matched_by NOT IN ('ean','sku') OR matched_by IS NULL)::int AS sin_match_fiable,
+      COUNT(*) FILTER (WHERE alerta_duplicado = true)::int AS duplicado,
+      COUNT(*) FILTER (WHERE alerta_multiples_ubicaciones = true)::int AS multiples_ubicaciones,
+      COUNT(*) FILTER (WHERE alerta_ubicacion_no_encontrada = true)::int AS ubicacion_no_encontrada,
+      COUNT(*) FILTER (WHERE bloquear_escritura = true)::int AS bloqueo_manual,
+      COUNT(*) FILTER (WHERE shopify_inventory_item_id IS NULL)::int AS sin_inventory_item_id,
+      COUNT(*) FILTER (WHERE shopify_stock IS NULL)::int AS sin_stock_shopify,
+      COUNT(*) FILTER (WHERE stock_aft IS NULL)::int AS sin_stock_aft,
+      COUNT(*) FILTER (WHERE stock_aft < 0)::int AS stock_aft_negativo
+    FROM shopify_match
+    WHERE estado IN ('cambiaria','a_cero','sin_cambio')
+      AND (
+        matched_by NOT IN ('ean','sku') OR matched_by IS NULL
+        OR alerta_duplicado = true OR alerta_multiples_ubicaciones = true OR alerta_ubicacion_no_encontrada = true
+        OR bloquear_escritura = true
+        OR shopify_inventory_item_id IS NULL OR shopify_stock IS NULL
+        OR stock_aft IS NULL OR stock_aft < 0
+      )
+  `);
+  return rows[0];
+}
+
+// Última ejecución de reposición con ESCRITURA REAL confirmada (no una
+// simulación, no una ejecución real que no llegó a actualizar nada) — para
+// mostrar en el dashboard "última sincronización efectiva" como algo
+// distinto de "última ejecución" (que puede haber sido solo dry run).
+async function obtenerUltimaReposicionEfectiva() {
+  const { rows } = await pool.query(`
+    SELECT id, finished_at, status, actualizados, verificaciones_fallidas, errores, modo, ref_solicitada
+    FROM reposicion_runs
+    WHERE dry_run = false AND actualizados > 0
+    ORDER BY finished_at DESC
+    LIMIT 1
+  `);
+  return rows[0] || null;
+}
+
 // ---------------------------------------------------------------------------
 // Procesa UN candidato: decide el tipo de evento, escribe de verdad solo si
 // escrituraRealActiva, y registra el evento. Única implementación de este
@@ -118,28 +189,61 @@ async function contarOmitidosPorAmbiguedad() {
 // nunca tenga dos copias que puedan divergir entre sí.
 // ---------------------------------------------------------------------------
 async function procesarCandidato(runId, fila, escrituraRealActiva, token) {
-  const antes = Number(fila.shopify_stock);
+  const antesSnapshot = Number(fila.shopify_stock);
   const nuevo = Number(fila.stock_aft);
-  const tipo = clasificarEvento(antes, nuevo);
-  const base = { ref: fila.ref, ean: fila.ean, marca: fila.marca, shopify_variant_id: fila.shopify_variant_id, shopify_inventory_item_id: fila.shopify_inventory_item_id, antes, nuevo, tipo };
+  const identidad = { ref: fila.ref, ean: fila.ean, marca: fila.marca, shopify_variant_id: fila.shopify_variant_id, shopify_inventory_item_id: fila.shopify_inventory_item_id };
 
-  if (tipo === 'sin_cambios') {
-    await registrarEvento(runId, { ...base, dry_run: !escrituraRealActiva, escrito: false, verificado: null, detalle: 'El stock de Shopify ya coincide con el de AFT — sin acción.' });
+  if (!escrituraRealActiva) {
+    // Sin escritura real no hay riesgo de pisar una venta, así que se usa el
+    // snapshot de la última sincronización — una lectura en vivo por cada
+    // candidato de un dry run (potencialmente cientos) no aporta seguridad y
+    // sí coste/cuota de API. El detalle deja explícito que NO es un dato en vivo.
+    const tipo = clasificarEvento(antesSnapshot, nuevo);
+    const base = { ...identidad, antes: antesSnapshot, nuevo, tipo };
+    if (tipo === 'sin_cambios') {
+      await registrarEvento(runId, { ...base, dry_run: true, escrito: false, verificado: null, detalle: 'El stock de Shopify (última sincronización) ya coincide con el de AFT — sin acción.' });
+      return { tipo, escrito: false, verificado: null, error: false };
+    }
+    await registrarEvento(runId, {
+      ...base, dry_run: true, escrito: false, verificado: null,
+      detalle: 'DRY RUN: calculado con el stock de la última sincronización (no en vivo) porque la escritura real no está autorizada para este camino, o falta el scope write_inventory. No se escribió en Shopify.'
+    });
     return { tipo, escrito: false, verificado: null, error: false };
   }
 
-  if (!escrituraRealActiva) {
+  // Escritura real: nunca se usa el snapshot de la última sincronización
+  // como base del compare-and-set ni para decidir el tipo de evento — se lee
+  // el stock disponible EN VIVO justo antes de escribir, para no sobrescribir
+  // una venta u otro cambio ocurrido en Shopify después de la última
+  // sincronización, y para no confundir una referencia que ya no exista en
+  // Shopify con un "stock 0" legítimo.
+  let antesVivo;
+  try {
+    antesVivo = await shopifyWrite.leerStockDisponible(token, { inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID });
+  } catch (e) {
+    await registrarEvento(runId, { ...identidad, antes: antesSnapshot, nuevo, tipo: 'error', dry_run: false, escrito: false, verificado: null, detalle: `No se pudo leer el stock en vivo antes de escribir: ${e.message}` });
+    return { tipo: 'error', escrito: false, verificado: null, error: true, mensaje: e.message };
+  }
+  if (antesVivo === null) {
     await registrarEvento(runId, {
-      ...base, dry_run: true, escrito: false, verificado: null,
-      detalle: 'DRY RUN: se calculó la actualización pero no se escribió en Shopify (la escritura real no está autorizada para este camino, o falta el scope write_inventory).'
+      ...identidad, antes: antesSnapshot, nuevo, tipo: 'error', dry_run: false, escrito: false, verificado: null,
+      detalle: 'La lectura en vivo previa a escribir no encontró el inventory item / la ubicación en Shopify — no se escribe, para no hacer un compare-and-set sobre un dato inexistente.'
     });
+    return { tipo: 'error', escrito: false, verificado: null, error: true, mensaje: 'Lectura en vivo previa a la escritura no encontró el item/ubicación.' };
+  }
+
+  const tipo = clasificarEvento(antesVivo, nuevo);
+  const base = { ...identidad, antes: antesVivo, nuevo, tipo };
+
+  if (tipo === 'sin_cambios') {
+    await registrarEvento(runId, { ...base, dry_run: false, escrito: false, verificado: null, detalle: 'El stock EN VIVO de Shopify (verificado justo antes de escribir) ya coincide con el de AFT — sin acción.' });
     return { tipo, escrito: false, verificado: null, error: false };
   }
 
   try {
     await shopifyWrite.establecerStockDisponible(token, {
       inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID,
-      cantidad: nuevo, cantidadEsperadaActual: antes, motivo: 'cycle_count_available'
+      cantidad: nuevo, cantidadEsperadaActual: antesVivo, motivo: 'cycle_count_available'
     });
     const leido = await shopifyWrite.leerStockDisponible(token, { inventoryItemId: fila.shopify_inventory_item_id, locationId: MAIN_LOCATION_ID });
     const verificado = leido === nuevo;
@@ -191,30 +295,49 @@ async function ejecutarReposicionStock(existingRunId) {
 
     await pool.query(`UPDATE reposicion_runs SET fase = 'procesando', total_candidatos = $2 WHERE id = $1`, [runId, candidatos.length]);
 
-    const c = { actualizados: 0, recuperados_stock_cero: 0, reposiciones_detectadas: 0, correcciones_a_la_baja: 0, sin_cambios: 0, errores: 0, verificaciones_fallidas: 0 };
+    const c = { actualizados: 0, simulados: 0, recuperados_stock_cero: 0, reposiciones_detectadas: 0, correcciones_a_la_baja: 0, sin_cambios: 0, errores: 0, verificaciones_fallidas: 0 };
 
     for (const fila of candidatos) {
       const r = await procesarCandidato(runId, fila, escrituraRealActiva, token);
+      const resultado = clasificarResultado(r);
 
-      if (r.tipo === 'sin_cambios') { c.sin_cambios++; continue; }
-      if (r.error) { c.errores++; continue; }
+      if (resultado === 'sin_cambios') { c.sin_cambios++; continue; }
+      if (resultado === 'error') { c.errores++; continue; }
       if (r.escrito && r.verificado === false) c.verificaciones_fallidas++;
 
-      c.actualizados++;
+      // 'actualizado' = escritura real confirmada en Shopify; 'simulado' =
+      // solo calculado (dry run) — nunca se cuentan juntos como "actualizados".
+      if (resultado === 'actualizado') c.actualizados++;
+      else c.simulados++;
+
       if (r.tipo === 'producto_recuperado_stock_cero_negativo') c.recuperados_stock_cero++;
       else if (r.tipo === 'reposicion_detectada') c.reposiciones_detectadas++;
       else if (r.tipo === 'correccion_a_la_baja') c.correcciones_a_la_baja++;
     }
 
+    // Una ejecución con escritura real activa que tuvo errores o escrituras
+    // sin verificar NUNCA se reporta como 'success' — 'parcial' deja visible
+    // que el día no quedó completamente sincronizado, sin ocultarlo.
+    const huboFalloReal = escrituraRealActiva && (c.errores > 0 || c.verificaciones_fallidas > 0);
+    const statusFinal = huboFalloReal ? 'parcial' : 'success';
+
     await pool.query(
-      `UPDATE reposicion_runs SET status='success', finished_at=now(), fase='done',
+      `UPDATE reposicion_runs SET status=$9, finished_at=now(), fase='done',
          actualizados=$2, recuperados_stock_cero=$3, reposiciones_detectadas=$4, correcciones_a_la_baja=$5,
-         sin_cambios=$6, errores=$7, verificaciones_fallidas=$8
+         sin_cambios=$6, errores=$7, verificaciones_fallidas=$8, simulados=$10
        WHERE id=$1`,
-      [runId, c.actualizados, c.recuperados_stock_cero, c.reposiciones_detectadas, c.correcciones_a_la_baja, c.sin_cambios, c.errores, c.verificaciones_fallidas]
+      [runId, c.actualizados, c.recuperados_stock_cero, c.reposiciones_detectadas, c.correcciones_a_la_baja, c.sin_cambios, c.errores, c.verificaciones_fallidas, statusFinal, c.simulados]
     );
 
-    return { runId, dryRun: !escrituraRealActiva, totalCandidatos: candidatos.length, omitidosAmbiguos, ...c };
+    if (huboFalloReal) {
+      await notificarFallo({
+        agente: 'reposicion',
+        mensaje: `Sincronización parcial: ${c.errores} error(es) y ${c.verificaciones_fallidas} escritura(s) sin verificar, de ${candidatos.length} candidatos (${c.actualizados} actualizados de verdad). Revisar reposicion_eventos del run #${runId}.`,
+        runId
+      });
+    }
+
+    return { runId, dryRun: !escrituraRealActiva, status: statusFinal, totalCandidatos: candidatos.length, omitidosAmbiguos, ...c };
   } catch (e) {
     await pool.query(
       `UPDATE reposicion_runs SET status='error', finished_at=now(), fase='error', error_message=$2 WHERE id=$1`,
@@ -275,25 +398,38 @@ async function ejecutarReposicionUnaReferencia(ref, iniciadoPor) {
     }
 
     const resultado = await procesarCandidato(runId, candidatos[0], escrituraRealActiva, token);
+    const clasificacion = clasificarResultado(resultado);
     const verificacionFallida = resultado.escrito && resultado.verificado === false;
+    const huboFalloReal = escrituraRealActiva && (clasificacion === 'error' || verificacionFallida);
+    const statusFinal = huboFalloReal ? 'parcial' : 'success';
 
     await pool.query(
-      `UPDATE reposicion_runs SET status='success', finished_at=now(), fase='done',
+      `UPDATE reposicion_runs SET status=$9, finished_at=now(), fase='done',
          actualizados=$2, recuperados_stock_cero=$3, reposiciones_detectadas=$4, correcciones_a_la_baja=$5,
-         sin_cambios=$6, errores=$7, verificaciones_fallidas=$8
+         sin_cambios=$6, errores=$7, verificaciones_fallidas=$8, simulados=$10
        WHERE id=$1`,
       [runId,
-       (!resultado.error && resultado.tipo !== 'sin_cambios') ? 1 : 0,
+       clasificacion === 'actualizado' ? 1 : 0,
        resultado.tipo === 'producto_recuperado_stock_cero_negativo' ? 1 : 0,
        resultado.tipo === 'reposicion_detectada' ? 1 : 0,
        resultado.tipo === 'correccion_a_la_baja' ? 1 : 0,
-       resultado.tipo === 'sin_cambios' ? 1 : 0,
-       resultado.error ? 1 : 0,
-       verificacionFallida ? 1 : 0]
+       clasificacion === 'sin_cambios' ? 1 : 0,
+       clasificacion === 'error' ? 1 : 0,
+       verificacionFallida ? 1 : 0,
+       statusFinal,
+       clasificacion === 'simulado' ? 1 : 0]
     );
 
+    if (huboFalloReal) {
+      await notificarFallo({
+        agente: 'reposicion (referencia única)',
+        mensaje: `La actualización de la referencia "${refLimpia}" terminó con ${clasificacion === 'error' ? ('un error: ' + (resultado.mensaje || 'ver reposicion_eventos')) : 'una escritura sin verificar'}.`,
+        runId
+      });
+    }
+
     return {
-      runId, dryRun: !escrituraRealActiva, encontrada: true, ref: refLimpia,
+      runId, dryRun: !escrituraRealActiva, encontrada: true, ref: refLimpia, status: statusFinal,
       tipo: resultado.tipo, escrito: resultado.escrito, verificado: resultado.verificado, error: resultado.error
     };
   } catch (e) {
@@ -377,4 +513,14 @@ async function previsualizarReposicion(limite) {
   };
 }
 
-module.exports = { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, clasificarEvento };
+module.exports = {
+  ejecutarReposicionStock,
+  ejecutarReposicionUnaReferencia,
+  previsualizarReposicion,
+  clasificarEvento,
+  clasificarResultado,
+  obtenerCandidatos,
+  contarOmitidosPorAmbiguedad,
+  obtenerBloqueadosPorMotivo,
+  obtenerUltimaReposicionEfectiva
+};

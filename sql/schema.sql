@@ -345,7 +345,7 @@ CREATE TABLE IF NOT EXISTS reposicion_runs (
   id                          SERIAL PRIMARY KEY,
   started_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at                 TIMESTAMPTZ,
-  status                      TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error'
+  status                      TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'parcial' | 'error'
   fase                        TEXT,
   dry_run                     BOOLEAN NOT NULL DEFAULT true,
   total_candidatos            INTEGER DEFAULT 0,
@@ -367,6 +367,11 @@ CREATE TABLE IF NOT EXISTS reposicion_runs (
 ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS modo TEXT NOT NULL DEFAULT 'lote'; -- 'lote' | 'referencia_unica'
 ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS ref_solicitada TEXT; -- solo cuando modo='referencia_unica'
 ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS iniciado_por TEXT; -- usuario del dashboard que lo lanzó
+
+-- Candidatos calculados pero NO escritos de verdad en Shopify (dry run, o
+-- escritura real desactivada) — separado de "actualizados" a propósito:
+-- "actualizados" solo cuenta escrituras reales confirmadas, nunca cálculos.
+ALTER TABLE reposicion_runs ADD COLUMN IF NOT EXISTS simulados INTEGER DEFAULT 0;
 
 -- Historial (append-only) de cada candidato evaluado por el agente de
 -- reposición, escrito o no — para que cada actualización (o la decisión de
