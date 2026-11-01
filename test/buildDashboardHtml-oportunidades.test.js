@@ -112,6 +112,18 @@ test('[dashboard] el filtro JS del cliente combina marca, margen y «solo candid
   assert.match(html, /data-candidata/);
 });
 
+test('[dashboard] «Solo candidatas» se aplica DE VERDAD al cargar la página, no solo el checkbox marcado', () => {
+  // Bug real encontrado en verificación manual: el checkbox se renderizaba
+  // marcado por defecto, pero sin invocar el filtro al cargar la página
+  // todas las filas (candidatas y descartadas) quedaban visibles hasta que
+  // alguien tocara el filtro a mano — «por defecto» no era cierto todavía.
+  const html = buildDashboardHtml({ ...BASE, oportunidadRows: [filaOportunidad({})] });
+  const idxDef = html.indexOf('function filtrarOportunidades()');
+  const idxCall = html.indexOf('filtrarOportunidades();', idxDef + 1);
+  assert.ok(idxDef > -1, 'la función debe estar definida');
+  assert.ok(idxCall > idxDef, 'debe invocarse de forma incondicional al cargar, después de definirse');
+});
+
 test('[dashboard] sin ninguna oportunidad se muestra el estado vacío, no una tabla rota', () => {
   const html = buildDashboardHtml({ ...BASE, oportunidadRows: [] });
   assert.match(html, /Ninguna referencia de tus marcas\/categorías comerciales está pendiente/);
