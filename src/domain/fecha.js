@@ -13,4 +13,14 @@ function fechaMadrid(ahora) {
   return d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
 }
 
-module.exports = { fechaMadrid };
+// Fecha de calendario (Madrid) de hace "dias" días — para acotar las
+// consultas de snapshots diarios a una ventana de 7/30/90 días sin asumir
+// cuántas filas existen realmente (una ventana sin datos suficientes
+// simplemente devuelve menos filas, nunca se rellena).
+function fechaHaceNDias(dias, ahora) {
+  const base = ahora || new Date();
+  const corrida = new Date(base.getTime() - Number(dias) * 86400000);
+  return fechaMadrid(corrida);
+}
+
+module.exports = { fechaMadrid, fechaHaceNDias };

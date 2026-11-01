@@ -6,6 +6,7 @@
 // explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
@@ -18,6 +19,7 @@ const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
+const { obtenerGraficos } = require('./src/usecases/obtenerGraficos');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -57,6 +59,12 @@ app.use((req, res, next) => {
   res.set('X-Robots-Tag', 'noindex, nofollow');
   next();
 });
+
+// Fase 3 — Chart.js vendorizado (ver public/vendor/chartjs-4.4.4/README.md):
+// servido localmente, nunca desde un CDN externo en producción. Sin
+// autenticación propia (es un archivo público, sin datos) para no
+// complicar la carga de <script> con credenciales Basic Auth.
+app.use('/vendor', express.static(path.join(__dirname, 'public', 'vendor'), { maxAge: '30d', immutable: true }));
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
@@ -800,6 +808,17 @@ async function renderDashboard() {
   // variable de entorno que usa shopifyClient.js para hablar con la API.
   const shopifyAdminStore = (process.env.SHOPIFY_SHOP || '').replace(/\.myshopify\.com$/i, '');
 
+  // Fase 3 — Gráficos: un fallo al leer los datos de gráficos nunca debe
+  // impedir que el resto del dashboard se muestre; se degrada a "sin
+  // datos" (el valor por defecto de buildDashboardHtml) en vez de romper
+  // toda la página.
+  let graficosData = null;
+  try {
+    graficosData = await obtenerGraficos();
+  } catch (e) {
+    console.error('[dashboard] No se pudieron cargar los datos de Gráficos:', e.message);
+  }
+
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
@@ -812,7 +831,8 @@ async function renderDashboard() {
     ultimaDemanda, demandaResultados,
     demandaConectada: hayIntegracionDemandaConfigurada(),
     ultimaFichas, fichasBorradores,
-    iaConectada: hayProveedorIaConfigurado()
+    iaConectada: hayProveedorIaConfigurado(),
+    graficosData
   });
 
   cache = { html, builtAt: now };

@@ -30,7 +30,8 @@ function buildDashboardHtml({
   demandaConectada,
   ultimaFichas,
   fichasBorradores,
-  iaConectada
+  iaConectada,
+  graficosData
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -48,6 +49,7 @@ const repoBadge = repoEsDryRun
 // test/buildDashboardHtml.characterization.test.js).
 const { esc, eur, pct, num, titleCase, pl, tiempoRelativo, icon, copiarReferenciaBtn } = require('./views/helpers');
 const { renderOportunidadesSection } = require('./views/oportunidadesView');
+const { renderGraficosSection } = require('./views/graficosView');
 
 // URL del producto en el admin de Shopify — construida SOLO a partir del
 // shopify_product_id real (el ID del producto padre, leído de la API vía
@@ -591,8 +593,18 @@ const integracionesHtml =
     '<div class="integ-sub" style="margin-top:4px;">Estas funciones existían en el panel original (de otros agentes, fuera de este repositorio) y todavía no se han conectado a una fuente de datos real — el panel no simula sus resultados.</div>' +
   '</div>' : '');
 
+// --- Página Gráficos (fase 3) ---
+const graficosDataSegura = graficosData || {
+  diasDisponibles: [7, 30, 90], primeraFechaSnapshot: null,
+  historialSync: [], historialDemanda: [], ejecucionesPorDia: [],
+  stockSnapshots: [], oportunidadesSnapshots: [], rentabilidadSnapshots: []
+};
+const { html: graficosHtml, script: graficosScript } = renderGraficosSection(graficosDataSegura);
+
 // --- HTML completo ---
-const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title><style>' +
+const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title>' +
+'<script src="/vendor/chartjs-4.4.4/chart.umd.js"></script>' +
+'<style>' +
 "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');" +
 '*{box-sizing:border-box;margin:0;padding:0;}' +
 ':root{--bg:#F7F8FA;--card:#FFFFFF;--border:#E5E7EB;--ink:#111827;--sub:#667085;--brand:#087F78;--brand-dark:#066b65;}' +
@@ -688,6 +700,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="sb-logo"><div class="sb-logo-mark">H</div><div><div class="sb-brand">HERRAMITIENDA</div><div class="sb-sub">AFT Intelligence</div></div><button class="hamburger" onclick="toggleNav()" aria-label="Abrir menú">☰</button></div>' +
 '<div class="sb-nav" id="sbNav">' +
 '<a class="sb-link active" data-page="inicio" onclick="ir(this)">' + icon('home', 17) + '<span>Inicio</span></a>' +
+'<a class="sb-link" data-page="graficos" onclick="ir(this)">' + icon('activity', 17) + '<span>Gráficos</span></a>' +
 '<a class="sb-link" data-page="coincidencias" onclick="ir(this)">' + icon('check', 17) + '<span>Coincidencias</span></a>' +
 '<a class="sb-link" data-page="oportunidades" onclick="ir(this)">' + icon('sparkles', 17) + '<span>Oportunidades</span></a>' +
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
@@ -715,6 +728,8 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '</div>' +
 '</div>' +
 
+'<div class="page" id="page-graficos"><div class="pagetitle">Gráficos evolutivos</div>' + graficosHtml + '</div>' +
+
 '<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
 
 '<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
@@ -735,7 +750,7 @@ fichasHtml +
 '<div class="page" id="page-configuracion"><div class="pagetitle">Configuración</div><div class="empty-state">Próximamente.</div></div>' +
 
 '</main><script>' +
-'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");}' +
+'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");if(id==="graficos"&&window.hmtGraficosInit)window.hmtGraficosInit();}' +
 'function copiarReferencia(btn,ref){var original=btn.innerHTML;function ok(){btn.innerHTML="Copiado ✓";setTimeout(function(){btn.innerHTML=original;},1500);}function fallback(){try{var ta=document.createElement("textarea");ta.value=ref;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.focus();ta.select();document.execCommand("copy");document.body.removeChild(ta);ok();}catch(e){btn.innerHTML="Ref: "+ref;}}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ref).then(ok).catch(fallback);}else{fallback();}}' +
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
@@ -789,7 +804,7 @@ fichasHtml +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollPipelineEstado(btn,out){pararPollPipeline();pipelinePollTimer=setInterval(function(){fetch("/api/pipeline-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFasePipeline(run);if(!run||run.status!=="running"){pararPollPipeline();btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("pipelineEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("pipelineEstadoTexto");if(txt)txt.textContent="Completo ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},3000);}' +
 'function ejecutarPipeline(btn){pararPollPipeline();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Ejecutando...";var out=document.getElementById("pipelineResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/pipeline-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollPipelineEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollPipelineEstado(btn,out);}else{btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
-'</script></body></html>';
+'</script><script>' + graficosScript + '</script></body></html>';
 
 return html;
 }
