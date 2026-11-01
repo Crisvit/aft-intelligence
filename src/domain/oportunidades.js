@@ -18,7 +18,15 @@
 // process.env al cargar el módulo (igual que antes) — simplificación
 // deliberada de esta fase; inyectar configuración es trabajo de la capa
 // de aplicación, en una fase posterior.
+//
+// Fase 2 — afinidad comercial (src/domain/afinidad.js) como componente
+// MÁS del score, en modo observación por defecto: OPORTUNIDADES_PESO_AFINIDAD=0
+// significa que su contribución es matemáticamente 0 siempre, sin excepción
+// — se calcula y se explica en "motivo" (para poder observarla), pero no
+// puede cambiar ningún score mientras el peso siga en 0. Ver
+// test/oportunidades.test.js para la prueba de regresión que lo confirma.
 const { round2 } = require('./costeMargen');
+const { clasificarAfinidadComercial } = require('./afinidad');
 
 function listaDesdeEnv(nombreEnv, porDefecto) {
   const valor = process.env[nombreEnv];
@@ -39,6 +47,15 @@ const PESO_STOCK_MAX = Number(process.env.OPORTUNIDADES_PESO_STOCK_MAX) || 20;
 const STOCK_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_STOCK_REFERENCIA) || 20;
 // Margen proyectado (%) a partir del cual el componente de margen satura.
 const MARGEN_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_MARGEN_REFERENCIA) || 50;
+// Peso del componente de afinidad comercial — 0 por defecto (modo
+// observación): se calcula y se muestra en "motivo", pero nunca aporta
+// puntos mientras no se active a propósito.
+const PESO_AFINIDAD = Number(process.env.OPORTUNIDADES_PESO_AFINIDAD) || 0;
+// Multiplicador del peso de afinidad según la clase — 'fuera_de_foco' y
+// 'ambigua' nunca aportan puntos, ni siquiera si se sube el peso por
+// encima de 0 (no tendría sentido premiar una categoría fuera de foco o
+// sin clasificar todavía).
+const MULTIPLICADOR_AFINIDAD = { principal: 1, complementaria: 0.6, estacional: 0.5, fuera_de_foco: 0, ambigua: 0 };
 
 function esMarcaPrioritaria(marca) {
   return BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
@@ -52,11 +69,13 @@ function calcularOportunidad(row) {
   const margen = row.margenPct != null ? Number(row.margenPct) : null;
   const stock = row.stock != null ? Number(row.stock) : 0;
   const pvp = row.precio != null ? Number(row.precio) : null;
+  const afinidad = clasificarAfinidadComercial(row.categoria);
 
   const ptsMarca = prioritaria ? PESO_MARCA_PRIORITARIA : 0;
   const ptsMargen = margen != null ? round2(Math.max(0, Math.min(1, margen / MARGEN_REFERENCIA_SATURACION)) * PESO_MARGEN_MAX) : 0;
   const ptsStock = round2(Math.max(0, Math.min(1, stock / STOCK_REFERENCIA_SATURACION)) * PESO_STOCK_MAX);
-  const score = round2(ptsMarca + ptsMargen + ptsStock);
+  const ptsAfinidad = round2((MULTIPLICADOR_AFINIDAD[afinidad.clase] || 0) * PESO_AFINIDAD);
+  const score = round2(ptsMarca + ptsMargen + ptsStock + ptsAfinidad);
 
   // Complementaria: margen proyectado no negativo y PVP recomendado bajo —
   // candidato a venta cruzada, nunca una señal de demanda real (no hay
@@ -67,10 +86,79 @@ function calcularOportunidad(row) {
   partes.push(prioritaria ? `marca prioritaria (${row.marca || '—'}, +${ptsMarca} pts)` : 'marca no prioritaria (+0 pts)');
   partes.push(margen != null ? `margen proyectado ${margen}% (+${ptsMargen} pts)` : 'margen proyectado no disponible (+0 pts)');
   partes.push(`stock AFT ${stock} uds. (+${ptsStock} pts)`);
+  partes.push(`afinidad ${afinidad.clase} (+${ptsAfinidad} pts)`);
   if (esComplementaria) partes.push(`PVP ${pvp}€ ≤ ${PVP_COMPLEMENTO_MAX}€ — candidata a venta complementaria`);
   const motivo = 'Puntuación ' + score + '/100: ' + partes.join(' · ') + '.';
 
-  return { score, esPrioritaria: prioritaria, esComplementaria, motivo };
+  return { score, esPrioritaria: prioritaria, esComplementaria, motivo, afinidad };
 }
 
-module.exports = { calcularOportunidad, esMarcaPrioritaria, BRANDS_PRIORITARIAS, PVP_COMPLEMENTO_MAX };
+// Orden determinista: score DESC, margenPct DESC (sin dato al final), stock
+// DESC, ref ASC — este último desempate garantiza unicidad siempre (ref es
+// PK en oportunidades_resultados), así el orden nunca depende del orden de
+// llegada de las filas ni de ningún valor ausente.
+function compararCandidatos(a, b) {
+  if (b.score !== a.score) return b.score - a.score;
+  const margenA = a.margenPct != null ? Number(a.margenPct) : null;
+  const margenB = b.margenPct != null ? Number(b.margenPct) : null;
+  if (margenA !== margenB) {
+    if (margenA == null) return 1;
+    if (margenB == null) return -1;
+    return margenB - margenA;
+  }
+  const stockA = a.stock != null ? Number(a.stock) : 0;
+  const stockB = b.stock != null ? Number(b.stock) : 0;
+  if (stockB !== stockA) return stockB - stockA;
+  return String(a.ref || '').localeCompare(String(b.ref || ''));
+}
+
+// seleccionarRanking: NUNCA descarta ningún candidato — anota en cada uno
+// cuál es su estado de elegibilidad, pero todos se devuelven (y por tanto se
+// persisten todos en hmt-db; el recorte es solo informativo, nunca de datos).
+// "excedente_categoria": válido pero supera el tope por categoría.
+// "excedente_total": válido pero supera el tope global del ranking principal.
+// "fuera_de_foco" / "ambigua_revision": según afinidad, SOLO cuando
+// filtroAfinidadActivo=true — con el gate en false (por defecto, modo
+// observación) la afinidad nunca decide elegibilidad, solo puntúa (y puntúa
+// 0 mientras PESO_AFINIDAD siga en 0).
+function seleccionarRanking(candidatos, opciones) {
+  const opts = opciones || {};
+  const maxPorCategoria = opts.maxPorCategoria != null ? opts.maxPorCategoria : 4;
+  const maxCandidatosTotal = opts.maxCandidatosTotal != null ? opts.maxCandidatosTotal : 60;
+  const filtroAfinidadActivo = !!opts.filtroAfinidadActivo;
+
+  const ordenados = candidatos.slice().sort(compararCandidatos);
+  const porCategoria = new Map();
+  let totalRecomendadas = 0;
+
+  return ordenados.map((c) => {
+    const clase = c.afinidad && c.afinidad.clase;
+    if (filtroAfinidadActivo && clase === 'fuera_de_foco') {
+      return { ...c, estadoElegibilidad: 'fuera_de_foco' };
+    }
+    if (filtroAfinidadActivo && clase === 'ambigua') {
+      return { ...c, estadoElegibilidad: 'ambigua_revision' };
+    }
+
+    const categoria = c.categoria || '';
+    const countCategoria = porCategoria.get(categoria) || 0;
+    if (countCategoria >= maxPorCategoria) {
+      return { ...c, estadoElegibilidad: 'excedente_categoria' };
+    }
+    if (totalRecomendadas >= maxCandidatosTotal) {
+      return { ...c, estadoElegibilidad: 'excedente_total' };
+    }
+
+    porCategoria.set(categoria, countCategoria + 1);
+    totalRecomendadas += 1;
+    return { ...c, estadoElegibilidad: 'recomendada' };
+  });
+}
+
+module.exports = {
+  calcularOportunidad,
+  esMarcaPrioritaria,
+  BRANDS_PRIORITARIAS,
+  PVP_COMPLEMENTO_MAX,
+  seleccionarRanking
+};
