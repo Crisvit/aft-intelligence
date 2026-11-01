@@ -139,11 +139,29 @@ CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,
   ref            TEXT,
   ean            TEXT,
-  tipo           TEXT NOT NULL,  -- 'ean_duplicado' | 'stock_negativo' | 'sin_correspondencia' | 'multiples_ubicaciones' | 'ubicacion_principal_no_encontrada'
+  tipo           TEXT NOT NULL,  -- 'ean_duplicado' | 'stock_negativo' | 'sin_correspondencia' | 'multiples_ubicaciones' | 'ubicacion_principal_no_encontrada' | 'afinidad_ambigua'
   detalle        TEXT,
   detectado_en   TIMESTAMPTZ NOT NULL DEFAULT now(),
   estado         TEXT NOT NULL DEFAULT 'pendiente'
 );
+
+-- Fase 2 — resolución de incidencias (independiente de las autorizaciones
+-- comerciales excepcionales de márgenes, ver clasificarMargen en
+-- src/domain/margen.js — no se mezclan en ninguna tabla ni campo). Hasta
+-- ahora ningún código avanzaba "estado" más allá de 'pendiente'; estas
+-- columnas permiten registrar quién y cómo se resolvió, sin tocar el
+-- significado de las columnas existentes.
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resuelto_por TEXT;
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resuelto_en TIMESTAMPTZ;
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS resolucion TEXT;
+
+-- Deduplicación segura frente a ejecuciones simultáneas: un índice único
+-- parcial (no un "SELECT primero, INSERT después" en la app, que tiene
+-- condición de carrera) sobre las incidencias de afinidad ambigua todavía
+-- pendientes para la misma ref. Una vez resuelta (estado != 'pendiente'),
+-- el índice deja de aplicar y una nueva incidencia para esa ref sí se crea.
+CREATE UNIQUE INDEX IF NOT EXISTS incidencias_afinidad_ambigua_ref_pendiente_idx
+  ON incidencias (ref) WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente';
 
 CREATE TABLE IF NOT EXISTS sync_lock (
   lock_key    TEXT PRIMARY KEY,
@@ -409,6 +427,18 @@ CREATE TABLE IF NOT EXISTS oportunidades_resultados (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS oportunidades_run_id INTEGER;
+
+-- Fase 2 — afinidad comercial y clasificación de margen (ver
+-- src/domain/afinidad.js y src/domain/margen.js): columnas puramente
+-- aditivas, informativas. "estado_elegibilidad" nunca decide qué se
+-- guarda (eso lo decide seleccionarRanking en src/domain/oportunidades.js,
+-- pero TODOS los candidatos válidos se persisten, nunca solo los
+-- recomendados — "No recortes el conjunto antes de guardarlo").
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS afinidad_clase TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS afinidad_motivo TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS margen_clasificacion TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS margen_prioridad_adicional BOOLEAN DEFAULT false;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS estado_elegibilidad TEXT; -- 'recomendada' | 'excedente_categoria' | 'excedente_total' | 'fuera_de_foco' | 'ambigua_revision'
 
 -- Agente 5 — Demanda y SEO. Genera candidatos de keyword a partir del
 -- catálogo real (marca + categoría + descripción) para las oportunidades
