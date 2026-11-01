@@ -13,6 +13,7 @@
 const { pool } = require('./db');
 const shopify = require('./shopifyClient');
 const shopifyWrite = require('./shopifyWriteClient');
+const { clasificarEvento } = require('./domain/reposicion');
 
 const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').toLowerCase() === 'true';
 // Gate INDEPENDIENTE para la actualización controlada de una sola
@@ -21,22 +22,6 @@ const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').to
 // programada del pipeline), que sigue mirando solo SHOPIFY_WRITE_ENABLED.
 const SHOPIFY_WRITE_UNA_REF_ENABLED = String(process.env.SHOPIFY_WRITE_UNA_REF_ENABLED || '').toLowerCase() === 'true';
 const MAIN_LOCATION_ID = process.env.SHOPIFY_MAIN_LOCATION_ID || 'gid://shopify/Location/102229836040';
-
-// Clasificación del cambio — puramente informativa para el historial, no
-// cambia la decisión de escribir ni el valor escrito (siempre el stock_aft
-// confirmado, como cantidad absoluta).
-//  - 'producto_recuperado_stock_cero_negativo': Shopify estaba en 0 o
-//    negativo y AFT confirma stock real > 0 — el caso más urgente.
-//  - 'reposicion_detectada': Shopify ya tenía stock positivo, pero AFT
-//    confirma más unidades de las que Shopify refleja.
-//  - 'correccion_a_la_baja': AFT confirma MENOS unidades que Shopify
-//    (incluido llegar a 0) — no es una reposición, es una corrección.
-function clasificarEvento(antes, nuevo) {
-  if (nuevo === antes) return 'sin_cambios';
-  if (antes <= 0 && nuevo > 0) return 'producto_recuperado_stock_cero_negativo';
-  if (nuevo > antes) return 'reposicion_detectada';
-  return 'correccion_a_la_baja';
-}
 
 // stock_shopify_despues guarda siempre el valor objetivo (f.nuevo): lo ya
 // escrito cuando escrito=true, o lo que se habría escrito (simulado en dry

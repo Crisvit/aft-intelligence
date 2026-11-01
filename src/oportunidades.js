@@ -16,50 +16,8 @@
 // descarta aquí a propósito: sin dato real, el componente vale 0, no un
 // valor intermedio inventado.
 const { pool } = require('./db');
-const { BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD, round2 } = require('./sync');
-
-const PVP_COMPLEMENTO_MAX = Number(process.env.OPORTUNIDADES_PVP_COMPLEMENTO_MAX) || 15;
-const PESO_MARCA_PRIORITARIA = Number(process.env.OPORTUNIDADES_PESO_MARCA_PRIORITARIA) || 40;
-const PESO_MARGEN_MAX = Number(process.env.OPORTUNIDADES_PESO_MARGEN_MAX) || 40;
-const PESO_STOCK_MAX = Number(process.env.OPORTUNIDADES_PESO_STOCK_MAX) || 20;
-// Unidades de stock AFT a partir de las cuales el componente de stock
-// satura (no sigue sumando por tener aún más unidades).
-const STOCK_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_STOCK_REFERENCIA) || 20;
-// Margen proyectado (%) a partir del cual el componente de margen satura.
-const MARGEN_REFERENCIA_SATURACION = Number(process.env.OPORTUNIDADES_MARGEN_REFERENCIA) || 50;
-
-function esMarcaPrioritaria(marca) {
-  return BRANDS_PRIORITARIAS.some((m) => String(marca || '').toUpperCase().includes(m));
-}
-
-// Cada componente del score es trazable a un dato real de hmt-db; el
-// "motivo" concatena exactamente esos mismos números, nunca una
-// explicación genérica desconectada del cálculo.
-function calcularOportunidad(row) {
-  const prioritaria = esMarcaPrioritaria(row.marca);
-  const margen = row.margenPct != null ? Number(row.margenPct) : null;
-  const stock = row.stock != null ? Number(row.stock) : 0;
-  const pvp = row.precio != null ? Number(row.precio) : null;
-
-  const ptsMarca = prioritaria ? PESO_MARCA_PRIORITARIA : 0;
-  const ptsMargen = margen != null ? round2(Math.max(0, Math.min(1, margen / MARGEN_REFERENCIA_SATURACION)) * PESO_MARGEN_MAX) : 0;
-  const ptsStock = round2(Math.max(0, Math.min(1, stock / STOCK_REFERENCIA_SATURACION)) * PESO_STOCK_MAX);
-  const score = round2(ptsMarca + ptsMargen + ptsStock);
-
-  // Complementaria: margen proyectado no negativo y PVP recomendado bajo —
-  // candidato a venta cruzada, nunca una señal de demanda real (no hay
-  // ninguna fuente de demanda conectada en este cálculo).
-  const esComplementaria = margen != null && margen >= 0 && pvp != null && pvp <= PVP_COMPLEMENTO_MAX;
-
-  const partes = [];
-  partes.push(prioritaria ? `marca prioritaria (${row.marca || '—'}, +${ptsMarca} pts)` : 'marca no prioritaria (+0 pts)');
-  partes.push(margen != null ? `margen proyectado ${margen}% (+${ptsMargen} pts)` : 'margen proyectado no disponible (+0 pts)');
-  partes.push(`stock AFT ${stock} uds. (+${ptsStock} pts)`);
-  if (esComplementaria) partes.push(`PVP ${pvp}€ ≤ ${PVP_COMPLEMENTO_MAX}€ — candidata a venta complementaria`);
-  const motivo = 'Puntuación ' + score + '/100: ' + partes.join(' · ') + '.';
-
-  return { score, esPrioritaria: prioritaria, esComplementaria, motivo };
-}
+const { STOCK_MINIMO_OPORTUNIDAD } = require('./sync');
+const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX } = require('./domain/oportunidades');
 
 const RESULT_COLS = [
   'ref', 'ean', 'marca', 'descripcion', 'categoria_nombre', 'stock_aft', 'coste', 'portes_proveedor_aft',
