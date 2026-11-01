@@ -17,11 +17,25 @@
 // valor intermedio inventado.
 const { pool } = require('./db');
 const { STOCK_MINIMO_OPORTUNIDAD } = require('./sync');
-const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX } = require('./domain/oportunidades');
+const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX, seleccionarRanking } = require('./domain/oportunidades');
+const { clasificarMargen } = require('./domain/margen');
+
+// Fase 2 — límites del ranking principal, configurables. NO filtran lo que
+// se guarda (ver seleccionarRanking): solo decide cuáles quedan marcadas
+// 'recomendada' frente a 'excedente_categoria'/'excedente_total'. Todos los
+// candidatos válidos se persisten siempre en oportunidades_resultados.
+const MAX_POR_CATEGORIA = Number(process.env.OPORTUNIDADES_MAX_POR_CATEGORIA) || 4;
+const MAX_CANDIDATOS_TOTAL = Number(process.env.OPORTUNIDADES_MAX_CANDIDATOS_TOTAL) || 60;
+// Gate independiente del peso de afinidad (OPORTUNIDADES_PESO_AFINIDAD):
+// con este flag en false (por defecto), la afinidad nunca decide
+// elegibilidad, solo se calcula y se muestra en "motivo" — modo observación
+// completo, sin alterar ninguna recomendación existente.
+const FILTRO_AFINIDAD_ACTIVO = process.env.OPORTUNIDADES_FILTRO_AFINIDAD_ACTIVO === 'true';
 
 const RESULT_COLS = [
   'ref', 'ean', 'marca', 'descripcion', 'categoria_nombre', 'stock_aft', 'coste', 'portes_proveedor_aft',
-  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo'
+  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo',
+  'afinidad_clase', 'afinidad_motivo', 'margen_clasificacion', 'margen_prioridad_adicional', 'estado_elegibilidad'
 ];
 function valoresResultado(f) { return RESULT_COLS.map((c) => (f[c] !== undefined ? f[c] : null)); }
 function construirInsertResultados(numFilas) {
@@ -58,6 +72,31 @@ async function guardarResultadosEnLotes(filas) {
   return guardadas;
 }
 
+// Fase 2 — una incidencia 'afinidad_ambigua' por ref con categoría que no
+// coincide con ninguna lista configurada, para revisión humana. Siempre se
+// registra (independiente de OPORTUNIDADES_FILTRO_AFINIDAD_ACTIVO: ese flag
+// solo decide si afecta al ranking, nunca si se avisa de la ambigüedad).
+// ON CONFLICT DO NOTHING sobre el índice único parcial — seguro frente a
+// ejecuciones simultáneas, sin "SELECT primero" con condición de carrera.
+// Deliberadamente separado de cualquier tabla/campo de autorización
+// comercial excepcional de márgenes (ver src/domain/margen.js) — no se
+// mezclan estos dos mecanismos de resolución.
+async function registrarIncidenciasAfinidadAmbigua(ranking) {
+  const ambiguas = ranking.filter((c) => c.afinidad && c.afinidad.clase === 'ambigua');
+  for (const c of ambiguas) {
+    try {
+      await pool.query(
+        `INSERT INTO incidencias (ref, ean, tipo, detalle)
+         VALUES ($1, $2, 'afinidad_ambigua', $3)
+         ON CONFLICT (ref) WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente' DO NOTHING`,
+        [c.ref, c.ean, c.afinidad.motivo]
+      );
+    } catch (e) {
+      console.error(`[oportunidades] Error SQL registrando incidencia afinidad_ambigua ref=${c.ref}: ${e.message}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Universo: referencias AFT de marcas/categorías comerciales (filtro ya
 // aplicado por sync.js) con stock mínimo configurado, que la última
@@ -87,21 +126,40 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
     await pool.query(`UPDATE oportunidades_runs SET fase = 'calculando', total_candidatos = $2 WHERE id = $1`, [runId, rows.length]);
 
     let prioritarias = 0, complementarias = 0;
-    const resultados = rows.map((row) => {
-      const o = calcularOportunidad(row);
+    const calculados = rows.map((row) => {
+      const o = calcularOportunidad({ ...row, categoria: row.categoria_nombre });
       if (o.esPrioritaria) prioritarias++;
       if (o.esComplementaria) complementarias++;
+      const margen = clasificarMargen(row.margenPct != null ? Number(row.margenPct) : null);
       return {
-        ref: row.ref, ean: row.ean, marca: row.marca, descripcion: row.descripcion, categoria_nombre: row.categoria_nombre,
-        stock_aft: row.stock, coste: row.coste, portes_proveedor_aft: row.portes,
-        pvp_recomendado: row.precio, margen_pct: row.margenPct,
-        es_marca_prioritaria: o.esPrioritaria, es_candidato_complementario: o.esComplementaria,
-        score: o.score, motivo: o.motivo
+        ref: row.ref, ean: row.ean, marca: row.marca, descripcion: row.descripcion, categoria: row.categoria_nombre,
+        stock: row.stock, coste: row.coste, portes: row.portes,
+        precio: row.precio, margenPct: row.margenPct,
+        esPrioritaria: o.esPrioritaria, esComplementaria: o.esComplementaria,
+        score: o.score, motivo: o.motivo, afinidad: o.afinidad, margen
       };
     });
 
+    const ranking = seleccionarRanking(calculados, {
+      maxPorCategoria: MAX_POR_CATEGORIA,
+      maxCandidatosTotal: MAX_CANDIDATOS_TOTAL,
+      filtroAfinidadActivo: FILTRO_AFINIDAD_ACTIVO
+    });
+
+    const resultados = ranking.map((c) => ({
+      ref: c.ref, ean: c.ean, marca: c.marca, descripcion: c.descripcion, categoria_nombre: c.categoria,
+      stock_aft: c.stock, coste: c.coste, portes_proveedor_aft: c.portes,
+      pvp_recomendado: c.precio, margen_pct: c.margenPct,
+      es_marca_prioritaria: c.esPrioritaria, es_candidato_complementario: c.esComplementaria,
+      score: c.score, motivo: c.motivo,
+      afinidad_clase: c.afinidad.clase, afinidad_motivo: c.afinidad.motivo,
+      margen_clasificacion: c.margen.tier, margen_prioridad_adicional: c.margen.prioridadAdicional,
+      estado_elegibilidad: c.estadoElegibilidad
+    }));
+
     await pool.query(`UPDATE oportunidades_runs SET fase = 'guardando' WHERE id = $1`, [runId]);
     const guardadas = await guardarResultadosEnLotes(resultados);
+    await registrarIncidenciasAfinidadAmbigua(ranking);
 
     await pool.query(
       `UPDATE oportunidades_runs SET status = 'success', finished_at = now(), fase = 'done',
@@ -120,4 +178,8 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
   }
 }
 
-module.exports = { ejecutarAnalisisOportunidades, calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX };
+module.exports = {
+  ejecutarAnalisisOportunidades, calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX,
+  seleccionarRanking, registrarIncidenciasAfinidadAmbigua,
+  MAX_POR_CATEGORIA, MAX_CANDIDATOS_TOTAL, FILTRO_AFINIDAD_ACTIVO
+};
