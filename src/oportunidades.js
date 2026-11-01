@@ -17,6 +17,8 @@
 // valor intermedio inventado.
 const { pool } = require('./db');
 const { BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD, round2 } = require('./sync');
+const { calcularScoreV3 } = require('./scoreV3');
+const { configCandidatos, seleccionarCandidatos } = require('./candidatos');
 
 const PVP_COMPLEMENTO_MAX = Number(process.env.OPORTUNIDADES_PVP_COMPLEMENTO_MAX) || 15;
 const PESO_MARCA_PRIORITARIA = Number(process.env.OPORTUNIDADES_PESO_MARCA_PRIORITARIA) || 40;
@@ -63,9 +65,18 @@ function calcularOportunidad(row) {
 
 const RESULT_COLS = [
   'ref', 'ean', 'marca', 'descripcion', 'categoria_nombre', 'stock_aft', 'coste', 'portes_proveedor_aft',
-  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo'
+  'pvp_recomendado', 'margen_pct', 'es_marca_prioritaria', 'es_candidato_complementario', 'score', 'motivo',
+  'score_v3', 'score_v3_cobertura', 'score_v3_etiqueta', 'score_v3_detalle',
+  'es_candidato', 'motivo_descarte', 'ranking_categoria'
 ];
-function valoresResultado(f) { return RESULT_COLS.map((c) => (f[c] !== undefined ? f[c] : null)); }
+function valoresResultado(f) {
+  return RESULT_COLS.map((c) => {
+    if (f[c] === undefined) return null;
+    // JSONB: pg espera texto JSON para un objeto (un objeto crudo se serializaría mal).
+    if (c === 'score_v3_detalle' && f[c] !== null) return JSON.stringify(f[c]);
+    return f[c];
+  });
+}
 function construirInsertResultados(numFilas) {
   const nCols = RESULT_COLS.length;
   const grupos = [];
@@ -119,7 +130,9 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
     const { rows } = await pool.query(
       `SELECT sm.ref, sm.ean, sm.marca, c.descripcion_corta AS descripcion, c.categoria_nombre, c.portes,
               sm.stock_aft AS stock, sm.precio_venta_aft AS precio, sm.coste_para_margen AS coste,
-              sm.margen_con_precio_aft_pct AS "margenPct"
+              sm.margen_con_precio_aft_pct AS "margenPct",
+              (SELECT MAX(d.volumen_busqueda) FROM demanda_resultados d
+                WHERE d.ref = sm.ref AND d.verificado = true AND d.volumen_busqueda IS NOT NULL) AS "volumenDemanda"
        FROM shopify_match sm
        JOIN aft_catalogo c ON c.ref = sm.ref
        WHERE sm.estado = 'no_encontrado' AND sm.es_oportunidad_comercial = true AND sm.stock_aft >= $1`,
@@ -129,18 +142,29 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
     await pool.query(`UPDATE oportunidades_runs SET fase = 'calculando', total_candidatos = $2 WHERE id = $1`, [runId, rows.length]);
 
     let prioritarias = 0, complementarias = 0;
-    const resultados = rows.map((row) => {
+    const base = rows.map((row) => {
       const o = calcularOportunidad(row);
       if (o.esPrioritaria) prioritarias++;
       if (o.esComplementaria) complementarias++;
+      // Score v3: demanda real = volumen verificado (NULL -> «Sin datos»);
+      // competitividad queda «Sin datos» hasta conectar un precio de mercado real.
+      const v3 = calcularScoreV3({
+        margenPct: row.margenPct, precio: row.precio, coste: row.coste, stock: row.stock,
+        categoria: row.categoria_nombre, volumenDemanda: row.volumenDemanda, precioMercado: null
+      });
       return {
         ref: row.ref, ean: row.ean, marca: row.marca, descripcion: row.descripcion, categoria_nombre: row.categoria_nombre,
         stock_aft: row.stock, coste: row.coste, portes_proveedor_aft: row.portes,
         pvp_recomendado: row.precio, margen_pct: row.margenPct,
         es_marca_prioritaria: o.esPrioritaria, es_candidato_complementario: o.esComplementaria,
-        score: o.score, motivo: o.motivo
+        score: o.score, motivo: o.motivo,
+        score_v3: v3.puntos, score_v3_cobertura: v3.cobertura, score_v3_etiqueta: v3.etiqueta,
+        score_v3_detalle: { resumen: v3.resumen, confianza: v3.confianza, puntosNormalizados: v3.puntosNormalizados, componentes: v3.componentes }
       };
     });
+    // Marca candidatos (stock mínimo, margen mínimo, tope por categoría...) sin
+    // eliminar ninguna referencia: las descartadas conservan su motivo.
+    const resultados = seleccionarCandidatos(base, configCandidatos());
 
     await pool.query(`UPDATE oportunidades_runs SET fase = 'guardando' WHERE id = $1`, [runId]);
     const guardadas = await guardarResultadosEnLotes(resultados);

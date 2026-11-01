@@ -753,13 +753,21 @@ async function renderDashboard() {
   // ver motivo por fila).
   const { rows: ultimaOportunidadesRows } = await pool.query(`SELECT * FROM oportunidades_runs ORDER BY id DESC LIMIT 1`);
   const ultimaOportunidades = ultimaOportunidadesRows[0] || null;
+  // score_v3/cobertura/etiqueta/detalle y es_candidato/motivo_descarte/
+  // ranking_categoria (ver src/scoreV3.js y src/candidatos.js) se leen aquí
+  // para que el panel los muestre — sin estas columnas en el SELECT, el
+  // panel no tiene forma de distinguir "Sin datos" de "no se consultó".
+  // El ORDER BY prioriza candidatas y Score v3 ANTES del LIMIT 500, para
+  // que un recorte por volumen nunca deje fuera a las mejores candidatas.
   const { rows: oportunidadRows } = await pool.query(
     `SELECT ref, ean, marca, descripcion, categoria_nombre, stock_aft AS stock, coste,
             portes_proveedor_aft, pvp_recomendado AS precio, margen_pct AS "margenPct",
             es_marca_prioritaria AS "esPrioritaria", es_candidato_complementario AS "esComplementaria",
-            score, motivo
+            score, motivo,
+            score_v3, score_v3_cobertura, score_v3_etiqueta, score_v3_detalle,
+            es_candidato, motivo_descarte, ranking_categoria
      FROM oportunidades_resultados
-     ORDER BY score DESC NULLS LAST, margen_pct DESC NULLS LAST
+     ORDER BY es_candidato DESC NULLS LAST, score_v3 DESC NULLS LAST, score DESC NULLS LAST, margen_pct DESC NULLS LAST
      LIMIT 500`
   );
 

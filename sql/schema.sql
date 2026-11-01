@@ -430,6 +430,18 @@ CREATE TABLE IF NOT EXISTS oportunidades_resultados (
   checked_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Score v3 (rentabilidad/demanda/competitividad/stock/afinidad) y selección
+-- de candidatos. Solo columnas nuevas, nullable: no cambian ni borran nada
+-- de lo existente. «Sin datos» = componente con puntos NULL en el detalle
+-- JSON (nunca un valor neutro inventado).
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS score_v3 NUMERIC;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS score_v3_cobertura NUMERIC;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS score_v3_etiqueta TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS score_v3_detalle JSONB;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS es_candidato BOOLEAN DEFAULT false;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS motivo_descarte TEXT;
+ALTER TABLE oportunidades_resultados ADD COLUMN IF NOT EXISTS ranking_categoria INTEGER;
+
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS oportunidades_run_id INTEGER;
 
 -- Agente 5 — Demanda y SEO. Genera candidatos de keyword a partir del
