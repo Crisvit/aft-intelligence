@@ -16,6 +16,7 @@ const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemand
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
+const { consultarHistorial, listarAlertasSubidaCoste, contarPendientesDeRetencion, RETENCION_MESES, UMBRAL_ALERTA_COSTE_PCT } = require('./src/historialCambios');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -601,6 +602,21 @@ app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
   }
 });
 
+// Historial de cambios reales de AFT (coste, PVP sin IVA, stock) por
+// referencia. SOLO LECTURA: un SELECT parametrizado sobre aft_cambios.
+// Filtros opcionales: ref, campo (costo|pvp_sin_iva|stock), desde, hasta
+// (ISO), limite (1-500, 50 por defecto) y offset.
+app.get('/api/historial-cambios', basicAuth, async (req, res) => {
+  try {
+    const datos = await consultarHistorial(pool, req.query);
+    res.json({ ok: true, ...datos });
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ ok: false, error: e.message });
+    console.error('[historial-cambios] Error leyendo el historial:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // Historial de solo lectura (últimas N ejecuciones, 10 por defecto) —
 // pensado para confirmar si la programación diaria (PIPELINE_SCHEDULE_HORA_MADRID)
 // está corriendo de verdad día a día, sin tener que lanzar un pipeline
@@ -805,6 +821,16 @@ async function renderDashboard() {
   // variable de entorno que usa shopifyClient.js para hablar con la API.
   const shopifyAdminStore = (process.env.SHOPIFY_SHOP || '').replace(/\.myshopify\.com$/i, '');
 
+  // Historial de cambios reales de AFT (coste, PVP sin IVA, stock) — foto
+  // inicial para la página "Cambios AFT" (los filtros por fecha/ref/campo
+  // se resuelven después vía /api/historial-cambios, solo lectura). Las
+  // alertas de subida de coste (>=10% por defecto) y el recuento de
+  // retención son igualmente de solo lectura: ninguna consulta de esta
+  // sección borra nada.
+  const { cambios: cambiosRows, total: cambiosTotal } = await consultarHistorial(pool, { limite: 100, offset: 0 });
+  const cambiosAlertas = await listarAlertasSubidaCoste(pool, { limite: 50 });
+  const cambiosRetencion = await contarPendientesDeRetencion(pool);
+
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
     ultimaRentabilidad, ultimoPipeline, rentabilidadResultados, rentabilidadAlertas, rentabilidadRecomendaciones,
@@ -817,7 +843,9 @@ async function renderDashboard() {
     ultimaDemanda, demandaResultados,
     demandaConectada: hayIntegracionDemandaConfigurada(),
     ultimaFichas, fichasBorradores,
-    iaConectada: hayProveedorIaConfigurado()
+    iaConectada: hayProveedorIaConfigurado(),
+    cambiosRows, cambiosTotal, cambiosAlertas, cambiosRetencion, cambiosRetencionMeses: RETENCION_MESES,
+    cambiosUmbralAlertaPct: UMBRAL_ALERTA_COSTE_PCT
   });
 
   cache = { html, builtAt: now };

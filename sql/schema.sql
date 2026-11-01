@@ -38,6 +38,28 @@ CREATE TABLE IF NOT EXISTS aft_stock_precios (
   ultima_actualizacion_local TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Historial (append-only) de cambios REALES de AFT por referencia: coste,
+-- PVP sin IVA y stock, con valor anterior, valor nuevo y fecha. Se escribe
+-- en la misma transacción que actualiza aft_stock_precios (ver
+-- src/historialCambios.js). Sin FK a aft_catalogo a propósito: el historial
+-- sobrevive si una ref desaparece del catálogo. Solo lectura desde el panel.
+CREATE TABLE IF NOT EXISTS aft_cambios (
+  id                BIGSERIAL PRIMARY KEY,
+  ref               TEXT NOT NULL,
+  campo             TEXT NOT NULL CHECK (campo IN ('costo', 'pvp_sin_iva', 'stock')),
+  valor_anterior    NUMERIC NOT NULL,
+  valor_nuevo       NUMERIC NOT NULL,
+  fecha_cambio_aft  TIMESTAMPTZ,            -- fechA_ULTIMO_CAMBIO que informa AFT (puede ser NULL)
+  detectado_en      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  import_run_id     INTEGER                 -- aft_import_runs.id; NULL si se lanzó sin run
+);
+CREATE INDEX IF NOT EXISTS idx_aft_cambios_ref ON aft_cambios (ref, detectado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_aft_cambios_fecha ON aft_cambios (detectado_en DESC);
+-- Segunda barrera contra duplicados: un mismo import no registra dos veces
+-- el mismo campo de la misma ref.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_aft_cambios_run_ref_campo
+  ON aft_cambios (import_run_id, ref, campo) WHERE import_run_id IS NOT NULL;
+
 -- Resultado de comparar cada producto AFT candidato contra Shopify en la
 -- última ejecución de sync. Es la foto actual (upsert por ref), no un historial.
 CREATE TABLE IF NOT EXISTS shopify_match (
