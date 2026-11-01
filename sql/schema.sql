@@ -611,3 +611,43 @@ CREATE TABLE IF NOT EXISTS rentabilidad_snapshots_diarios (
   total_evaluados    INTEGER,
   generado_en        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Fase 3 — Aprobaciones. Autorizaciones comerciales excepcionales para
+-- productos con margen <10% (clasificarMargen -> 'autorizacion_excepcional',
+-- ver src/domain/margen.js). Mecanismo DELIBERADAMENTE separado de
+-- afinidad_categorias_resueltas: ninguna tabla ni campo se comparte entre
+-- "resolver una categoría de afinidad ambigua" y "autorizar un margen
+-- bajo" — son dos decisiones comerciales distintas, con dueños distintos.
+-- Append-only con historial: igual que afinidad_categorias_resueltas,
+-- "decidir de nuevo" sobre la misma ref crea una fila nueva en vez de
+-- sobrescribir la anterior; el índice único parcial garantiza una sola
+-- decisión 'vigente' a la vez por referencia.
+CREATE TABLE IF NOT EXISTS autorizaciones_margen (
+  id             SERIAL PRIMARY KEY,
+  ref            TEXT NOT NULL,
+  margen_pct     NUMERIC,
+  estado         TEXT NOT NULL,  -- 'autorizada' | 'rechazada'
+  decidido_por   TEXT NOT NULL,
+  decidido_en    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  motivo         TEXT NOT NULL,
+  vigente        BOOLEAN NOT NULL DEFAULT true
+);
+CREATE UNIQUE INDEX IF NOT EXISTS autorizaciones_margen_vigente_idx
+  ON autorizaciones_margen (ref) WHERE vigente = true;
+
+-- Registro de auditoría de TODAS las acciones de escritura de
+-- Aprobaciones (resolver/revocar afinidad, autorizar/rechazar margen) —
+-- qué se pidió, quién lo pidió, si se aplicó o se denegó por falta de
+-- permiso, y por qué. Nunca se borra ni se edita una fila existente.
+CREATE TABLE IF NOT EXISTS auditoria_acciones (
+  id           SERIAL PRIMARY KEY,
+  usuario      TEXT NOT NULL,
+  accion       TEXT NOT NULL,   -- 'afinidad.resolver' | 'afinidad.revocar' | 'margen.autorizar' | 'margen.rechazar' | ...
+  entidad      TEXT,            -- p.ej. 'categoria' | 'ref'
+  entidad_id   TEXT,            -- p.ej. la categoría normalizada, o la ref
+  resultado    TEXT NOT NULL,   -- 'aplicado' | 'denegado' | 'error'
+  detalle      JSONB,
+  creado_en    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_creado_en ON auditoria_acciones (creado_en);
+CREATE INDEX IF NOT EXISTS idx_auditoria_acciones_usuario ON auditoria_acciones (usuario);

@@ -31,7 +31,8 @@ function buildDashboardHtml({
   ultimaFichas,
   fichasBorradores,
   iaConectada,
-  graficosData
+  graficosData,
+  aprobacionesData
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -50,6 +51,7 @@ const repoBadge = repoEsDryRun
 const { esc, eur, pct, num, titleCase, pl, tiempoRelativo, icon, copiarReferenciaBtn } = require('./views/helpers');
 const { renderOportunidadesSection } = require('./views/oportunidadesView');
 const { renderGraficosSection } = require('./views/graficosView');
+const { renderAprobacionesSection } = require('./views/aprobacionesView');
 
 // URL del producto en el admin de Shopify — construida SOLO a partir del
 // shopify_product_id real (el ID del producto padre, leído de la API vía
@@ -601,6 +603,10 @@ const graficosDataSegura = graficosData || {
 };
 const { html: graficosHtml, script: graficosScript } = renderGraficosSection(graficosDataSegura);
 
+// --- Página Aprobaciones (fase 3) ---
+const aprobacionesDataSegura = aprobacionesData || { incidenciasAgrupadas: [], autorizacionesPendientes: [], historialAfinidad: [], historialMargen: [] };
+const { html: aprobacionesHtml, script: aprobacionesScript } = renderAprobacionesSection(aprobacionesDataSegura);
+
 // --- HTML completo ---
 const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AFT Intelligence — Herramitienda</title>' +
 '<script src="/vendor/chartjs-4.4.4/chart.umd.js"></script>' +
@@ -703,6 +709,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<a class="sb-link" data-page="graficos" onclick="ir(this)">' + icon('activity', 17) + '<span>Gráficos</span></a>' +
 '<a class="sb-link" data-page="coincidencias" onclick="ir(this)">' + icon('check', 17) + '<span>Coincidencias</span></a>' +
 '<a class="sb-link" data-page="oportunidades" onclick="ir(this)">' + icon('sparkles', 17) + '<span>Oportunidades</span></a>' +
+'<a class="sb-link" data-page="aprobaciones" onclick="ir(this)">' + icon('check', 17) + '<span>Aprobaciones</span></a>' +
 '<a class="sb-link" data-page="productos" onclick="ir(this)">' + icon('box', 17) + '<span>Productos</span></a>' +
 '<a class="sb-link" data-page="rentabilidad" onclick="ir(this)">' + icon('alertTri', 17) + '<span>Rentabilidad</span></a>' +
 '<a class="sb-link" data-page="actividad" onclick="ir(this)">' + icon('activity', 17) + '<span>Actividad</span></a>' +
@@ -733,6 +740,8 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
 
 '<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
+
+'<div class="page" id="page-aprobaciones"><div class="pagetitle">Aprobaciones</div><p style="font-size:11.5px;color:var(--sub);margin:-8px 0 16px;">Tres flujos de revisión humana, completamente separados entre sí — ninguno publica en Shopify.</p>' + aprobacionesHtml + '</div>' +
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
@@ -804,7 +813,7 @@ fichasHtml +
 'function formatearFasePipeline(run){if(!run)return "Iniciando...";if(run.status==="running"){var etiquetas={import_aft:"Importando AFT",sync_shopify:"Sincronizando Shopify",rentabilidad:"Calculando rentabilidad"};return (etiquetas[run.etapa]||"En curso")+"...";}if(run.status==="success"){return "Pipeline completo.";}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollPipelineEstado(btn,out){pararPollPipeline();pipelinePollTimer=setInterval(function(){fetch("/api/pipeline-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFasePipeline(run);if(!run||run.status!=="running"){pararPollPipeline();btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(run&&run.status==="success"){if(out)out.style.color="#059669";var dot=document.getElementById("pipelineEstadoDot");if(dot)dot.className="dot dot-ok";var txt=document.getElementById("pipelineEstadoTexto");if(txt)txt.textContent="Completo ahora mismo";location.reload();}else if(out){out.style.color="#DC2626";}}}).catch(function(){});},3000);}' +
 'function ejecutarPipeline(btn){pararPollPipeline();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Ejecutando...";var out=document.getElementById("pipelineResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/pipeline-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollPipelineEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollPipelineEstado(btn,out);}else{btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Ejecutar pipeline completo";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
-'</script><script>' + graficosScript + '</script></body></html>';
+'</script><script>' + graficosScript + '</script><script>' + aprobacionesScript + '</script></body></html>';
 
 return html;
 }
