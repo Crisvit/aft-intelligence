@@ -69,7 +69,14 @@ function calcularOportunidad(row) {
   const margen = row.margenPct != null ? Number(row.margenPct) : null;
   const stock = row.stock != null ? Number(row.stock) : 0;
   const pvp = row.precio != null ? Number(row.precio) : null;
-  const afinidad = clasificarAfinidadComercial(row.categoria);
+  // row.resolucionAfinidad (fase 3, opcional): una decisión humana
+  // persistida para esta categoría exacta (ver
+  // src/domain/afinidadResolucion.js). La carga desde hmt-db es siempre
+  // responsabilidad de la capa exterior (src/oportunidades.js) — este
+  // módulo sigue sin tocar ninguna base de datos; solo decide, dado el
+  // dato ya resuelto, que una resolución humana prevalece siempre sobre
+  // la clasificación automática.
+  const afinidad = clasificarAfinidadComercial(row.categoria, undefined, row.resolucionAfinidad);
 
   const ptsMarca = prioritaria ? PESO_MARCA_PRIORITARIA : 0;
   const ptsMargen = margen != null ? round2(Math.max(0, Math.min(1, margen / MARGEN_REFERENCIA_SATURACION)) * PESO_MARGEN_MAX) : 0;

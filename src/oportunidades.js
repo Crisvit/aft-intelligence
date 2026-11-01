@@ -19,6 +19,29 @@ const { pool } = require('./db');
 const { STOCK_MINIMO_OPORTUNIDAD } = require('./sync');
 const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX, seleccionarRanking } = require('./domain/oportunidades');
 const { clasificarMargen } = require('./domain/margen');
+const { normalizarCategoria } = require('./domain/afinidad');
+const { resolucionDesdeFila } = require('./domain/afinidadResolucion');
+const afinidadResolucionRepo = require('./repositories/afinidadResolucionRepo');
+
+// Fase 3 — afinidad persistente: una decisión humana sobre una categoría
+// (tabla afinidad_categorias_resueltas) prevalece siempre sobre la
+// clasificación automática, mientras esté vigente ('activa'). Se carga
+// una vez por ejecución (nunca una consulta por fila) y se aplica aquí,
+// en la capa exterior — el dominio (calcularOportunidad) sigue siendo
+// puro: solo recibe la resolución ya resuelta como dato, nunca consulta
+// nada por sí mismo. Un fallo al cargar las resoluciones no bloquea la
+// ejecución: se continúa sin ninguna resolución aplicada (equivalente a
+// modo observación — ninguna categoría queda peor que sin esta función).
+async function cargarMapaResolucionesAfinidad() {
+  const mapa = new Map();
+  try {
+    const filas = await afinidadResolucionRepo.listarActivas();
+    for (const fila of filas) mapa.set(fila.categoria_normalizada, resolucionDesdeFila(fila));
+  } catch (e) {
+    console.error(`[oportunidades] No se pudieron cargar las resoluciones de afinidad persistidas: ${e.message}. Se continúa sin ninguna aplicada.`);
+  }
+  return mapa;
+}
 
 // Fase 2 — límites del ranking principal, configurables. NO filtran lo que
 // se guarda (ver seleccionarRanking): solo decide cuáles quedan marcadas
@@ -86,10 +109,10 @@ async function registrarIncidenciasAfinidadAmbigua(ranking) {
   for (const c of ambiguas) {
     try {
       await pool.query(
-        `INSERT INTO incidencias (ref, ean, tipo, detalle)
-         VALUES ($1, $2, 'afinidad_ambigua', $3)
+        `INSERT INTO incidencias (ref, ean, tipo, detalle, categoria_normalizada)
+         VALUES ($1, $2, 'afinidad_ambigua', $3, $4)
          ON CONFLICT (ref) WHERE tipo = 'afinidad_ambigua' AND estado = 'pendiente' DO NOTHING`,
-        [c.ref, c.ean, c.afinidad.motivo]
+        [c.ref, c.ean, c.afinidad.motivo, normalizarCategoria(c.categoria)]
       );
     } catch (e) {
       console.error(`[oportunidades] Error SQL registrando incidencia afinidad_ambigua ref=${c.ref}: ${e.message}`);
@@ -125,9 +148,12 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
 
     await pool.query(`UPDATE oportunidades_runs SET fase = 'calculando', total_candidatos = $2 WHERE id = $1`, [runId, rows.length]);
 
+    const resolucionesAfinidad = await cargarMapaResolucionesAfinidad();
+
     let prioritarias = 0, complementarias = 0;
     const calculados = rows.map((row) => {
-      const o = calcularOportunidad({ ...row, categoria: row.categoria_nombre });
+      const resolucionAfinidad = resolucionesAfinidad.get(normalizarCategoria(row.categoria_nombre)) || undefined;
+      const o = calcularOportunidad({ ...row, categoria: row.categoria_nombre, resolucionAfinidad });
       if (o.esPrioritaria) prioritarias++;
       if (o.esComplementaria) complementarias++;
       const margen = clasificarMargen(row.margenPct != null ? Number(row.margenPct) : null);

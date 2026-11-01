@@ -523,3 +523,38 @@ CREATE TABLE IF NOT EXISTS fichas_borradores (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS fichas_run_id INTEGER;
+
+-- Fase 3 — afinidad persistente: una decisión humana sobre una categoría
+-- (ver src/domain/afinidadResolucion.js, src/usecases/resolverAfinidad.js)
+-- prevalece sobre la clasificación automática mientras esté 'activa', y
+-- nunca se pierde: "modificar" una decisión revoca la anterior y crea una
+-- fila nueva (nunca se sobrescribe un campo in situ), así el historial
+-- completo queda siempre consultable. El índice único parcial garantiza
+-- que solo pueda existir una resolución 'activa' por categoría a la vez,
+-- de forma segura frente a ejecuciones simultáneas (mismo patrón que el
+-- índice de incidencias.afinidad_ambigua de fase 2).
+CREATE TABLE IF NOT EXISTS afinidad_categorias_resueltas (
+  id                     SERIAL PRIMARY KEY,
+  categoria_normalizada  TEXT NOT NULL,
+  categoria_original     TEXT,
+  clase                  TEXT NOT NULL,  -- 'principal' | 'complementaria' | 'estacional' | 'fuera_de_foco' (nunca 'ambigua')
+  motivo                 TEXT NOT NULL,
+  estado                 TEXT NOT NULL DEFAULT 'activa',  -- 'activa' | 'revocada'
+  resuelto_por           TEXT NOT NULL,
+  resuelto_en            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revocado_por           TEXT,
+  revocado_en            TIMESTAMPTZ,
+  revocado_motivo        TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS afinidad_categorias_resueltas_activa_idx
+  ON afinidad_categorias_resueltas (categoria_normalizada) WHERE estado = 'activa';
+CREATE INDEX IF NOT EXISTS idx_afinidad_categorias_resueltas_categoria
+  ON afinidad_categorias_resueltas (categoria_normalizada);
+
+-- categoria_normalizada en incidencias (solo para tipo='afinidad_ambigua')
+-- permite cerrar en bloque todas las incidencias pendientes de una
+-- categoría en el momento en que se resuelve, sin tener que parsear el
+-- texto libre de "detalle". No se usa para ningún otro tipo de incidencia.
+ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS categoria_normalizada TEXT;
+CREATE INDEX IF NOT EXISTS idx_incidencias_categoria_normalizada
+  ON incidencias (categoria_normalizada) WHERE tipo = 'afinidad_ambigua';
