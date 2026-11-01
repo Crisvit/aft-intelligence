@@ -532,3 +532,16 @@ CREATE TABLE IF NOT EXISTS fichas_borradores (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS fichas_run_id INTEGER;
+
+-- Sesiones del panel (express-session + connect-pg-simple) — sustituye la
+-- ventana nativa de Basic Auth por un único login que deja una sesión
+-- persistente y firmada en una cookie httpOnly (ver server.js, src/auth.js).
+-- No es una tabla de negocio: solo guarda el id de sesión, su contenido
+-- (gestionado por la librería, nunca a mano) y su caducidad. Nombres y
+-- tipos de columna son los que exige connect-pg-simple por defecto.
+CREATE TABLE IF NOT EXISTS user_sessions (
+  sid    VARCHAR NOT NULL COLLATE "default" PRIMARY KEY,
+  sess   JSON NOT NULL,
+  expire TIMESTAMP(6) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expire ON user_sessions (expire);

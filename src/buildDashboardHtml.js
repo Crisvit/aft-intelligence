@@ -962,7 +962,9 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="page active" id="page-inicio">' +
 (datosDesactualizados && ultimoSync ? '<div class="stale-banner">' + icon('alertTri', 16) + '<span>Los datos no se actualizan desde hace más de ' + HORAS_LIMITE_DESACTUALIZADO + ' horas (última comparación: ' + esc(tiempoRelativo(ultimoSync.finished_at)) + '). Ejecuta una nueva sincronización desde Integraciones.</span></div>' : '') +
 '<div class="header"><div><h1>AFT Intelligence</h1><div class="sub">Control de inventario y oportunidades entre AFT y Shopify — solo lectura.</div></div>' +
-'<div class="header-right">' + (ultimoSync ? '<div class="updated">Última comparación: ' + esc(tiempoRelativo(ultimoSync.finished_at)) + '</div>' : '') + '<div class="avatar">H</div></div></div>' +
+'<div class="header-right">' + (ultimoSync ? '<div class="updated">Última comparación: ' + esc(tiempoRelativo(ultimoSync.finished_at)) + '</div>' : '') + '<div class="avatar">H</div>' +
+  '<form method="POST" action="/logout" style="margin:0;"><button type="submit" style="background:none;border:none;color:var(--sub);font-size:12px;cursor:pointer;padding:0;text-decoration:underline;">Cerrar sesión</button></form>' +
+'</div></div>' +
 '<div class="kpi-row">' + kpiHtml + '</div>' +
 '<section class="block" id="attnSection"><div class="sec-head"><h2>Necesita tu atención</h2></div><div class="attn-grid">' + atencionHtml + '</div></section>' +
 '<div class="bottom-grid">' +

@@ -6,7 +6,8 @@
 // explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const PgSession = require('connect-pg-simple')(session);
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
@@ -19,6 +20,7 @@ const shopifyWrite = require('./src/shopifyWriteClient');
 const { consultarHistorial, listarAlertasSubidaCoste, contarPendientesDeRetencion, RETENCION_MESES, UMBRAL_ALERTA_COSTE_PCT } = require('./src/historialCambios');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
+const { credencialesValidas, esRutaPaginaHtml } = require('./src/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,29 +32,112 @@ const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').to
 
 const DASHBOARD_USER = process.env.DASHBOARD_USER;
 const DASHBOARD_PASSWORD_HASH = process.env.DASHBOARD_PASSWORD_HASH;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+// true por defecto (la cookie de sesión solo se envía por HTTPS, que es
+// como se sirve este panel en producción tras el proxy de Easypanel).
+// Poner a "false" SOLO para probar en local por HTTP sin TLS.
+const SESSION_COOKIE_SECURE = String(process.env.SESSION_COOKIE_SECURE || 'true').toLowerCase() !== 'false';
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 días — sesión persistente, sin re-pedir login en cada visita.
 
-function basicAuth(req, res, next) {
-  if (!DASHBOARD_USER || !DASHBOARD_PASSWORD_HASH) {
-    res.status(500).send('Faltan DASHBOARD_USER / DASHBOARD_PASSWORD_HASH en el entorno.');
+// Detrás de un proxy que termina TLS (Easypanel) hace falta esto para que
+// Express sepa que la conexión es segura y envíe la cookie "secure".
+app.set('trust proxy', 1);
+
+if (!SESSION_SECRET) {
+  console.error('[sesión] Falta SESSION_SECRET en el entorno — el panel no podrá mantener sesiones seguras.');
+}
+
+app.use(session({
+  store: new PgSession({ pool, tableName: 'user_sessions', createTableIfMissing: false }),
+  secret: SESSION_SECRET || 'solo-para-que-no-explote-sin-SESSION_SECRET-configurado',
+  name: 'aft_sesion',
+  resave: false,
+  saveUninitialized: false,
+  rolling: true, // cada visita renueva los 30 días — una sesión activa nunca caduca por sí sola.
+  cookie: { httpOnly: true, sameSite: 'lax', secure: SESSION_COOKIE_SECURE, maxAge: SESSION_MAX_AGE_MS }
+}));
+
+// Sustituye la ventana nativa de Basic Auth: un único login (/login) deja
+// una sesión persistente y firmada en una cookie httpOnly — el navegador
+// no vuelve a preguntar hasta que la sesión caduque (30 días sin visitar)
+// o se cierre sesión explícitamente. Mismas credenciales de siempre
+// (DASHBOARD_USER/DASHBOARD_PASSWORD_HASH, ver src/auth.js) — no es un
+// sistema de usuarios nuevo, solo cambia el transporte.
+function requireSesion(req, res, next) {
+  if (!DASHBOARD_USER || !DASHBOARD_PASSWORD_HASH || !SESSION_SECRET) {
+    res.status(500).send('Faltan DASHBOARD_USER / DASHBOARD_PASSWORD_HASH / SESSION_SECRET en el entorno.');
     return;
   }
-  const header = req.headers.authorization || '';
-  const [scheme, encoded] = header.split(' ');
-  if (scheme !== 'Basic' || !encoded) {
-    res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
-    return res.status(401).send('Autenticación requerida.');
+  if (req.session && req.session.autenticado) {
+    req.dashboardUser = req.session.usuario;
+    return next();
   }
-  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-  const idx = decoded.indexOf(':');
-  const user = decoded.slice(0, idx);
-  const pass = decoded.slice(idx + 1);
-  if (user !== DASHBOARD_USER || !bcrypt.compareSync(pass, DASHBOARD_PASSWORD_HASH)) {
-    res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
-    return res.status(401).send('Credenciales incorrectas.');
+  if (esRutaPaginaHtml(req.path)) {
+    return res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
   }
-  req.dashboardUser = user;
-  next();
+  return res.status(401).json({ ok: false, error: 'No autenticado. Inicia sesión en /login.' });
 }
+
+function paginaLogin({ error, next } = {}) {
+  const siguiente = next && next.startsWith('/') ? next : '/';
+  return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>Acceso — AFT Intelligence</title>' +
+    '<style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#F8FAFC;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;}' +
+    '.card{background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:32px;width:320px;box-shadow:0 1px 3px rgba(0,0,0,.08);}' +
+    'h1{font-size:18px;margin:0 0 20px;color:#0F172A;}label{display:block;font-size:12.5px;color:#475569;margin:14px 0 4px;}' +
+    'input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #CBD5E1;border-radius:8px;font-size:14px;}' +
+    'button{margin-top:20px;width:100%;padding:10px;border:none;border-radius:8px;background:#0F172A;color:#fff;font-size:14px;cursor:pointer;}' +
+    '.err{background:#FEF2F2;color:#DC2626;font-size:12.5px;padding:8px 10px;border-radius:8px;margin-bottom:12px;}</style></head><body>' +
+    '<form class="card" method="POST" action="/login">' +
+    '<h1>AFT Intelligence</h1>' +
+    (error ? '<div class="err">' + error + '</div>' : '') +
+    '<input type="hidden" name="next" value="' + siguiente.replace(/"/g, '&quot;') + '">' +
+    '<label for="usuario">Usuario</label><input id="usuario" name="usuario" autocomplete="username" required autofocus>' +
+    '<label for="password">Contraseña</label><input id="password" name="password" type="password" autocomplete="current-password" required>' +
+    '<button type="submit">Entrar</button>' +
+    '</form></body></html>';
+}
+
+app.get('/login', (req, res) => {
+  if (req.session && req.session.autenticado) return res.redirect('/');
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(paginaLogin({ next: req.query.next }));
+});
+
+app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const { usuario, password, next: siguiente } = req.body || {};
+  if (!credencialesValidas(usuario, password, { dashboardUser: DASHBOARD_USER, dashboardPasswordHash: DASHBOARD_PASSWORD_HASH })) {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    return res.status(401).send(paginaLogin({ error: 'Usuario o contraseña incorrectos.', next: siguiente }));
+  }
+  // Regenerar el id de sesión en el login evita la fijación de sesión
+  // (que alguien reutilice un id de sesión capturado antes de autenticarse).
+  req.session.regenerate((err) => {
+    if (err) {
+      console.error('[sesión] No se pudo crear la sesión:', err.message);
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.status(500).send(paginaLogin({ error: 'No se pudo iniciar sesión. Inténtalo de nuevo.', next: siguiente }));
+    }
+    req.session.autenticado = true;
+    req.session.usuario = usuario;
+    req.session.save((err2) => {
+      if (err2) {
+        console.error('[sesión] No se pudo guardar la sesión:', err2.message);
+        res.set('Content-Type', 'text/html; charset=utf-8');
+        return res.status(500).send(paginaLogin({ error: 'No se pudo iniciar sesión. Inténtalo de nuevo.', next: siguiente }));
+      }
+      res.redirect(siguiente && siguiente.startsWith('/') ? siguiente : '/');
+    });
+  });
+});
+
+app.post('/logout', (req, res) => {
+  if (!req.session) return res.redirect('/login');
+  req.session.destroy(() => {
+    res.clearCookie('aft_sesion');
+    res.redirect('/login');
+  });
+});
 
 app.use((req, res, next) => {
   res.set('X-Robots-Tag', 'noindex, nofollow');
@@ -62,7 +147,7 @@ app.use((req, res, next) => {
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
 // Estado real de las conexiones — sin exponer ningún secreto.
-app.get('/status', basicAuth, async (req, res) => {
+app.get('/status', requireSesion, async (req, res) => {
   const result = { db: null, shopify: null, checkedAt: new Date().toISOString() };
   try {
     const { rows } = await pool.query(
@@ -90,7 +175,7 @@ app.get('/status', basicAuth, async (req, res) => {
 // que no requiere SHOPIFY_WRITE_ENABLED=true ni escribe nada. Pensado para
 // poder confirmar el permiso antes de activar cualquier escritura real,
 // sin tener que lanzar un agente completo para averiguarlo.
-app.get('/api/shopify-scopes', basicAuth, async (req, res) => {
+app.get('/api/shopify-scopes', requireSesion, async (req, res) => {
   try {
     const token = await shopify.getShopifyToken();
     const scopes = await shopifyWrite.listarScopesConcedidos(token);
@@ -143,7 +228,7 @@ async function haySolapamiento() {
 // Corre en segundo plano (responde 202 de inmediato) con el progreso real
 // guardado en aft_import_runs, para no depender de un timeout HTTP largo
 // y para poder sondear el avance desde el dashboard.
-app.post('/api/aft-import', basicAuth, async (req, res) => {
+app.post('/api/aft-import', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -176,7 +261,7 @@ app.post('/api/aft-import', basicAuth, async (req, res) => {
 });
 
 // Progreso/resultado de la última importación AFT, para el polling del dashboard.
-app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
+app.get('/api/aft-import/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM aft_import_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -193,7 +278,7 @@ app.get('/api/aft-import/estado', basicAuth, async (req, res) => {
 // escribe en Shopify la cantidad confirmada por AFT. DRY RUN por defecto —
 // ver src/reposicion.js. Corre en segundo plano (202 inmediato); el
 // progreso real se sigue en sync_runs y reposicion_runs.
-app.post('/api/sync-run', basicAuth, async (req, res) => {
+app.post('/api/sync-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -225,7 +310,7 @@ app.post('/api/sync-run', basicAuth, async (req, res) => {
 });
 
 // Progreso/resultado de la última reposición automática de stock.
-app.get('/api/reposicion-run/estado', basicAuth, async (req, res) => {
+app.get('/api/reposicion-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM reposicion_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -238,7 +323,7 @@ app.get('/api/reposicion-run/estado', basicAuth, async (req, res) => {
 // Lanza el paso de reposición de forma independiente, sobre el último
 // shopify_match ya guardado (sin volver a leer Shopify ni AFT) — útil para
 // re-simular o reintentar sin tener que relanzar toda la sincronización.
-app.post('/api/reposicion-run', basicAuth, async (req, res) => {
+app.post('/api/reposicion-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -266,7 +351,7 @@ app.post('/api/reposicion-run', basicAuth, async (req, res) => {
 // (gate propio, independiente de SHOPIFY_WRITE_ENABLED) se queda en dry
 // run igual que el lote. Síncrona (una sola referencia, rápido) — no usa
 // el patrón 202+polling del resto de agentes.
-app.post('/api/reposicion-run/una-referencia', basicAuth, express.json(), async (req, res) => {
+app.post('/api/reposicion-run/una-referencia', requireSesion, express.json(), async (req, res) => {
   try {
     const ref = req.body && req.body.ref;
     const confirmar = req.body && req.body.confirmar === true;
@@ -291,7 +376,7 @@ app.post('/api/reposicion-run/una-referencia', basicAuth, express.json(), async 
 // referencia (obtenerCandidatos(), sin tocarlo), nunca una consulta
 // aparte. No pasa por haySolapamiento() a propósito — es una lectura, no
 // compite por el candado con ningún agente, y no lo necesita.
-app.get('/api/reposicion-run/previsualizacion', basicAuth, async (req, res) => {
+app.get('/api/reposicion-run/previsualizacion', requireSesion, async (req, res) => {
   try {
     const resultado = await previsualizarReposicion(req.query.limite);
     res.json({ ok: true, ...resultado });
@@ -302,7 +387,7 @@ app.get('/api/reposicion-run/previsualizacion', basicAuth, async (req, res) => {
 });
 
 // Progreso/resultado de la última sincronización Shopify, para polling.
-app.get('/api/sync-run/estado', basicAuth, async (req, res) => {
+app.get('/api/sync-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -315,7 +400,7 @@ app.get('/api/sync-run/estado', basicAuth, async (req, res) => {
 // Agente de rentabilidad: coste desglosado + transporte al cliente
 // configurado + margen real/proyectado + alertas. Solo lee shopify_match/
 // aft_catalogo ya guardados — no llama a Shopify ni a AFT.
-app.post('/api/rentabilidad-run', basicAuth, async (req, res) => {
+app.post('/api/rentabilidad-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -339,7 +424,7 @@ app.post('/api/rentabilidad-run', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/rentabilidad-run/estado', basicAuth, async (req, res) => {
+app.get('/api/rentabilidad-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM rentabilidad_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -352,7 +437,7 @@ app.get('/api/rentabilidad-run/estado', basicAuth, async (req, res) => {
 // Agente 4: oportunidades comerciales, como proceso independiente con su
 // propio historial. Solo lee shopify_match/aft_catalogo ya guardados — no
 // llama a AFT ni a Shopify, no escribe nada fuera de hmt-db.
-app.post('/api/oportunidades-run', basicAuth, async (req, res) => {
+app.post('/api/oportunidades-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -376,7 +461,7 @@ app.post('/api/oportunidades-run', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/oportunidades-run/estado', basicAuth, async (req, res) => {
+app.get('/api/oportunidades-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM oportunidades_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -390,7 +475,7 @@ app.get('/api/oportunidades-run/estado', basicAuth, async (req, res) => {
 // real para las oportunidades del Agente 4, y consulta volumen/competencia
 // REAL solo si DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD están configurados —
 // si no, termina con status 'no_conectado' (nunca inventa un volumen).
-app.post('/api/demanda-run', basicAuth, async (req, res) => {
+app.post('/api/demanda-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -414,7 +499,7 @@ app.post('/api/demanda-run', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/demanda-run/estado', basicAuth, async (req, res) => {
+app.get('/api/demanda-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM demanda_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -430,7 +515,7 @@ app.get('/api/demanda-run/estado', basicAuth, async (req, res) => {
 // — si no, termina con status 'no_conectado' y no genera nada. Nunca
 // publica en Shopify: aprobar/rechazar/editar son cambios de estado en
 // PostgreSQL únicamente.
-app.post('/api/fichas-run', basicAuth, async (req, res) => {
+app.post('/api/fichas-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -454,7 +539,7 @@ app.post('/api/fichas-run', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/fichas-run/estado', basicAuth, async (req, res) => {
+app.get('/api/fichas-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM fichas_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -466,7 +551,7 @@ app.get('/api/fichas-run/estado', basicAuth, async (req, res) => {
 
 // Revisión humana de un borrador — SOLO cambia su estado en PostgreSQL.
 // Esta ruta, igual que el resto del agente, no llama nunca a Shopify.
-app.post('/api/fichas/:id/aprobar', basicAuth, async (req, res) => {
+app.post('/api/fichas/:id/aprobar', requireSesion, async (req, res) => {
   try {
     const borrador = await revisarBorrador(Number(req.params.id), 'aprobado', req.dashboardUser);
     res.json({ ok: true, borrador });
@@ -475,7 +560,7 @@ app.post('/api/fichas/:id/aprobar', basicAuth, async (req, res) => {
   }
 });
 
-app.post('/api/fichas/:id/rechazar', basicAuth, async (req, res) => {
+app.post('/api/fichas/:id/rechazar', requireSesion, async (req, res) => {
   try {
     const borrador = await revisarBorrador(Number(req.params.id), 'rechazado', req.dashboardUser);
     res.json({ ok: true, borrador });
@@ -484,7 +569,7 @@ app.post('/api/fichas/:id/rechazar', basicAuth, async (req, res) => {
   }
 });
 
-app.post('/api/fichas/:id/editar', basicAuth, express.json(), async (req, res) => {
+app.post('/api/fichas/:id/editar', requireSesion, express.json(), async (req, res) => {
   try {
     const borrador = await editarBorrador(Number(req.params.id), req.body || {}, req.dashboardUser);
     res.json({ ok: true, borrador });
@@ -578,7 +663,7 @@ async function lanzarPipelineCompleto() {
   return pipelineId;
 }
 
-app.post('/api/pipeline-run', basicAuth, async (req, res) => {
+app.post('/api/pipeline-run', requireSesion, async (req, res) => {
   try {
     const enCurso = await haySolapamiento();
     if (enCurso) {
@@ -592,7 +677,7 @@ app.post('/api/pipeline-run', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
+app.get('/api/pipeline-run/estado', requireSesion, async (req, res) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1`);
     res.json({ ok: true, run: rows[0] || null });
@@ -606,7 +691,7 @@ app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
 // referencia. SOLO LECTURA: un SELECT parametrizado sobre aft_cambios.
 // Filtros opcionales: ref, campo (costo|pvp_sin_iva|stock), desde, hasta
 // (ISO), limite (1-500, 50 por defecto) y offset.
-app.get('/api/historial-cambios', basicAuth, async (req, res) => {
+app.get('/api/historial-cambios', requireSesion, async (req, res) => {
   try {
     const datos = await consultarHistorial(pool, req.query);
     res.json({ ok: true, ...datos });
@@ -621,7 +706,7 @@ app.get('/api/historial-cambios', basicAuth, async (req, res) => {
 // pensado para confirmar si la programación diaria (PIPELINE_SCHEDULE_HORA_MADRID)
 // está corriendo de verdad día a día, sin tener que lanzar un pipeline
 // nuevo solo para comprobarlo. No modifica nada.
-app.get('/api/pipeline-run/historial', basicAuth, async (req, res) => {
+app.get('/api/pipeline-run/historial', requireSesion, async (req, res) => {
   try {
     const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 10, 1), 100);
     const { rows } = await pool.query(
@@ -637,7 +722,7 @@ app.get('/api/pipeline-run/historial', basicAuth, async (req, res) => {
 });
 
 // Informe de diferencias de inventario, en JSON, para integraciones o revisión manual.
-app.get('/api/diff', basicAuth, async (req, res) => {
+app.get('/api/diff', requireSesion, async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM shopify_match ORDER BY checked_at DESC`);
   const { rows: incRows } = await pool.query(`SELECT * FROM incidencias WHERE estado='pendiente' ORDER BY detectado_en DESC`);
   res.json({
@@ -859,7 +944,7 @@ async function renderDashboard() {
   return html;
 }
 
-app.get('/', basicAuth, async (req, res) => {
+app.get('/', requireSesion, async (req, res) => {
   try {
     const html = await renderDashboard();
     res.set('Content-Type', 'text/html; charset=utf-8');
