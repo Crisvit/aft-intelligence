@@ -162,10 +162,33 @@ function seleccionarRanking(candidatos, opciones) {
   });
 }
 
+// Fase 3 — agregados para el snapshot diario de oportunidades (ver
+// src/repositories/snapshotsRepo.js). Pura reducción sobre el ranking ya
+// calculado, sin ningún acceso a datos — nunca se recalcula ni se vuelve
+// a consultar nada, solo se cuenta lo que ya está en memoria.
+function calcularTotalesOportunidades(ranking) {
+  const totales = {
+    totalCandidatos: ranking.length,
+    recomendadas: 0, excedenteCategoria: 0, excedenteTotal: 0,
+    afinidadPrincipal: 0, afinidadComplementaria: 0, afinidadEstacional: 0, afinidadAmbigua: 0, afinidadFueraDeFoco: 0,
+    margenAutorizacionExcepcional: 0, margenRevisionComercial: 0, margenAptoEvaluacion: 0, margenSinDato: 0
+  };
+  const ESTADO_KEY = { recomendada: 'recomendadas', excedente_categoria: 'excedenteCategoria', excedente_total: 'excedenteTotal' };
+  const AFINIDAD_KEY = { principal: 'afinidadPrincipal', complementaria: 'afinidadComplementaria', estacional: 'afinidadEstacional', ambigua: 'afinidadAmbigua', fuera_de_foco: 'afinidadFueraDeFoco' };
+  const MARGEN_KEY = { autorizacion_excepcional: 'margenAutorizacionExcepcional', revision_comercial: 'margenRevisionComercial', apto_evaluacion: 'margenAptoEvaluacion', sin_dato: 'margenSinDato' };
+  for (const c of ranking) {
+    if (ESTADO_KEY[c.estadoElegibilidad]) totales[ESTADO_KEY[c.estadoElegibilidad]]++;
+    if (c.afinidad && AFINIDAD_KEY[c.afinidad.clase]) totales[AFINIDAD_KEY[c.afinidad.clase]]++;
+    if (c.margen && MARGEN_KEY[c.margen.tier]) totales[MARGEN_KEY[c.margen.tier]]++;
+  }
+  return totales;
+}
+
 module.exports = {
   calcularOportunidad,
   esMarcaPrioritaria,
   BRANDS_PRIORITARIAS,
   PVP_COMPLEMENTO_MAX,
-  seleccionarRanking
+  seleccionarRanking,
+  calcularTotalesOportunidades
 };

@@ -558,3 +558,56 @@ CREATE INDEX IF NOT EXISTS idx_afinidad_categorias_resueltas_categoria
 ALTER TABLE incidencias ADD COLUMN IF NOT EXISTS categoria_normalizada TEXT;
 CREATE INDEX IF NOT EXISTS idx_incidencias_categoria_normalizada
   ON incidencias (categoria_normalizada) WHERE tipo = 'afinidad_ambigua';
+
+-- Fase 3 — snapshots diarios para los gráficos evolutivos (ver
+-- src/domain/fecha.js, src/repositories/snapshotsRepo.js). Una fila por
+-- día de calendario en hora de Madrid ("fecha" PRIMARY KEY): con varias
+-- ejecuciones el mismo día, cada escritura hace UPSERT sobre esa misma
+-- fila, así que el snapshot del día refleja siempre la ÚLTIMA ejecución
+-- CORRECTA de ese día — nunca una ejecución fallida (solo se escribe tras
+-- status='success' del run de origen) y nunca se pueden duplicar filas
+-- (el PRIMARY KEY lo impide estructuralmente, no una comprobación de la
+-- aplicación). "run_id" + "generado_en" dan procedencia verificable: de
+-- qué ejecución exacta salieron esos números y cuándo se escribieron. No
+-- hay backfill: estas tablas arrancan vacías y solo crecen hacia delante
+-- desde que este código empieza a ejecutarse — no se inventa ningún
+-- histórico anterior.
+CREATE TABLE IF NOT EXISTS stock_snapshots_diarios (
+  fecha            DATE PRIMARY KEY,
+  run_id           INTEGER,
+  total_sku        INTEGER,
+  matched          INTEGER,
+  con_diferencia   INTEGER,
+  a_cero           INTEGER,
+  sin_cambio       INTEGER,
+  generado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oportunidades_snapshots_diarios (
+  fecha                         DATE PRIMARY KEY,
+  run_id                        INTEGER,
+  total_candidatos              INTEGER,
+  recomendadas                  INTEGER,
+  excedente_categoria           INTEGER,
+  excedente_total               INTEGER,
+  afinidad_principal            INTEGER,
+  afinidad_complementaria       INTEGER,
+  afinidad_estacional           INTEGER,
+  afinidad_ambigua              INTEGER,
+  afinidad_fuera_de_foco        INTEGER,
+  margen_autorizacion_excepcional INTEGER,
+  margen_revision_comercial     INTEGER,
+  margen_apto_evaluacion        INTEGER,
+  margen_sin_dato               INTEGER,
+  generado_en                   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS rentabilidad_snapshots_diarios (
+  fecha              DATE PRIMARY KEY,
+  run_id             INTEGER,
+  en_perdida         INTEGER,
+  margen_bajo        INTEGER,
+  datos_incompletos  INTEGER,
+  total_evaluados    INTEGER,
+  generado_en        TIMESTAMPTZ NOT NULL DEFAULT now()
+);

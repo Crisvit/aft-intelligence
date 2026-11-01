@@ -10,6 +10,8 @@ const { pool } = require('./db');
 const aft = require('./aftClient');
 const shopify = require('./shopifyClient');
 const { calcularCosteYMargen, normalizar, round2 } = require('./domain/costeMargen');
+const { fechaMadrid } = require('./domain/fecha');
+const snapshotsRepo = require('./repositories/snapshotsRepo');
 // BRANDS_PRIORITARIAS decide el orden de las oportunidades comerciales
 // (esas marcas primero), no filtra nada por sí sola: el filtro de
 // inclusión (BRANDS/CATEGORIAS_INCLUIDAS) vive en src/domain/costeMargen.js,
@@ -673,6 +675,19 @@ async function runInventorySync(existingRunId) {
        WHERE id = $1`,
       [runId, candidatos.length, counters.matched, counters.cambiarian, counters.aCero, counters.sinCambio, counters.incidencias, counters.noEncontrados]
     );
+
+    // Fase 3 — snapshot diario para los gráficos evolutivos. Solo se
+    // escribe aquí, tras un éxito confirmado (nunca sobre un error, ver
+    // el catch de abajo) — y un fallo al escribirlo nunca revierte ni
+    // bloquea la sincronización que ya terminó bien.
+    try {
+      await snapshotsRepo.upsertStockSnapshot({
+        fecha: fechaMadrid(), runId, totalSku: candidatos.length,
+        matched: counters.matched, conDiferencia: counters.cambiarian, aCero: counters.aCero, sinCambio: counters.sinCambio
+      });
+    } catch (e) {
+      console.error(`[sync] No se pudo escribir el snapshot diario de stock (run ${runId}): ${e.message}`);
+    }
 
     return {
       runId, totalCandidatos: candidatos.length,

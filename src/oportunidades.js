@@ -17,11 +17,13 @@
 // valor intermedio inventado.
 const { pool } = require('./db');
 const { STOCK_MINIMO_OPORTUNIDAD } = require('./sync');
-const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX, seleccionarRanking } = require('./domain/oportunidades');
+const { calcularOportunidad, esMarcaPrioritaria, PVP_COMPLEMENTO_MAX, seleccionarRanking, calcularTotalesOportunidades } = require('./domain/oportunidades');
 const { clasificarMargen } = require('./domain/margen');
 const { normalizarCategoria } = require('./domain/afinidad');
 const { resolucionDesdeFila } = require('./domain/afinidadResolucion');
+const { fechaMadrid } = require('./domain/fecha');
 const afinidadResolucionRepo = require('./repositories/afinidadResolucionRepo');
+const snapshotsRepo = require('./repositories/snapshotsRepo');
 
 // Fase 3 — afinidad persistente: una decisión humana sobre una categoría
 // (tabla afinidad_categorias_resueltas) prevalece siempre sobre la
@@ -193,6 +195,16 @@ async function ejecutarAnalisisOportunidades(existingRunId) {
        WHERE id = $1`,
       [runId, guardadas, prioritarias, complementarias]
     );
+
+    // Fase 3 — snapshot diario, solo tras éxito confirmado. Reduce sobre
+    // el ranking ya calculado en memoria, sin volver a consultar nada; un
+    // fallo al escribirlo nunca bloquea ni revierte la ejecución.
+    try {
+      const totales = calcularTotalesOportunidades(ranking);
+      await snapshotsRepo.upsertOportunidadesSnapshot({ fecha: fechaMadrid(), runId, totales });
+    } catch (e) {
+      console.error(`[oportunidades] No se pudo escribir el snapshot diario (run ${runId}): ${e.message}`);
+    }
 
     return { runId, totalCandidatos: rows.length, guardados: guardadas, prioritarias, complementarias };
   } catch (e) {

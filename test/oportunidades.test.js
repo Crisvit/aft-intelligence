@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { calcularOportunidad, esMarcaPrioritaria, seleccionarRanking } = require('../src/oportunidades');
+const { calcularTotalesOportunidades } = require('../src/domain/oportunidades');
 
 test('esMarcaPrioritaria: reconoce las marcas prioritarias por defecto', () => {
   assert.equal(esMarcaPrioritaria('WOLFPACK'), true);
@@ -162,4 +163,36 @@ test('seleccionarRanking: con filtroAfinidadActivo=true, fuera_de_foco y ambigua
   assert.equal(ranking.find((r) => r.ref === 'B').estadoElegibilidad, 'ambigua_revision');
   assert.equal(ranking.find((r) => r.ref === 'C').estadoElegibilidad, 'recomendada');
   assert.equal(ranking.length, 3);
+});
+
+// --- [fase 3] calcularTotalesOportunidades: agregados puros para el snapshot diario ---
+
+test('[fase 3] calcularTotalesOportunidades: cuenta por estado de elegibilidad, afinidad y margen', () => {
+  const ranking = [
+    { estadoElegibilidad: 'recomendada', afinidad: { clase: 'principal' }, margen: { tier: 'apto_evaluacion' } },
+    { estadoElegibilidad: 'recomendada', afinidad: { clase: 'ambigua' }, margen: { tier: 'revision_comercial' } },
+    { estadoElegibilidad: 'excedente_categoria', afinidad: { clase: 'complementaria' }, margen: { tier: 'autorizacion_excepcional' } },
+    { estadoElegibilidad: 'excedente_total', afinidad: { clase: 'fuera_de_foco' }, margen: { tier: 'sin_dato' } }
+  ];
+  const t = calcularTotalesOportunidades(ranking);
+  assert.equal(t.totalCandidatos, 4);
+  assert.equal(t.recomendadas, 2);
+  assert.equal(t.excedenteCategoria, 1);
+  assert.equal(t.excedenteTotal, 1);
+  assert.equal(t.afinidadPrincipal, 1);
+  assert.equal(t.afinidadAmbigua, 1);
+  assert.equal(t.afinidadComplementaria, 1);
+  assert.equal(t.afinidadFueraDeFoco, 1);
+  assert.equal(t.margenAptoEvaluacion, 1);
+  assert.equal(t.margenRevisionComercial, 1);
+  assert.equal(t.margenAutorizacionExcepcional, 1);
+  assert.equal(t.margenSinDato, 1);
+});
+
+test('[fase 3] calcularTotalesOportunidades: ranking vacío da todos los contadores en 0, nunca inventa datos', () => {
+  const t = calcularTotalesOportunidades([]);
+  assert.equal(t.totalCandidatos, 0);
+  assert.equal(t.recomendadas, 0);
+  assert.equal(t.afinidadPrincipal, 0);
+  assert.equal(t.margenSinDato, 0);
 });
