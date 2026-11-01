@@ -9,6 +9,7 @@
 const { pool } = require('./db');
 const aft = require('./aftClient');
 const shopify = require('./shopifyClient');
+const { registrarCambiosLote } = require('./historialCambios');
 
 // Listas configurables por entorno (CSV), sin tocar el código para
 // ajustarlas — si la variable no está definida, se usa el valor de
@@ -124,27 +125,38 @@ async function actualizarProgresoImport(runId, campos) {
 // sin perder el resto de filas correctas del lote ni de los lotes ya
 // confirmados. Cada lote/fila vive en su propia transacción corta: nunca
 // hay una única transacción gigante que pueda hacer ROLLBACK de todo.
-async function procesarEnLotes(client, items, { tabla, columnas, conflictCol, colTimestamp, valoresFn, claveErrorFn, tipo, runId, campoInsertados }) {
+//
+// `antesDeLote` (opcional): se ejecuta DENTRO de la misma transacción,
+// justo antes del upsert, y devuelve cuántos registros dejó escritos (p. ej.
+// el historial de cambios). Solo se contabiliza tras el COMMIT: si el lote
+// se deshace, también se deshace lo que escribió, y el reintento fila a
+// fila lo vuelve a calcular contra la foto sin modificar.
+async function procesarEnLotes(client, items, { tabla, columnas, conflictCol, colTimestamp, valoresFn, claveErrorFn, tipo, runId, campoInsertados, antesDeLote }) {
   let insertados = 0;
   let erroresSql = 0;
+  let cambiosRegistrados = 0;
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const lote = items.slice(i, i + BATCH_SIZE);
     await client.query('BEGIN');
     try {
+      const previos = antesDeLote ? await antesDeLote(client, lote.map(valoresFn), runId) : 0;
       const sql = construirInsertMultiple(tabla, columnas, conflictCol, lote.length, colTimestamp);
       await client.query(sql, lote.flatMap(valoresFn));
       await client.query('COMMIT');
       insertados += lote.length;
+      cambiosRegistrados += previos;
     } catch (e) {
       await client.query('ROLLBACK');
       console.error(`[ingestAft] Fallo el lote de ${tipo} (filas ${i}-${i + lote.length - 1}): ${e.message}. Reintentando fila a fila.`);
       for (const item of lote) {
         await client.query('BEGIN');
         try {
+          const previosFila = antesDeLote ? await antesDeLote(client, [valoresFn(item)], runId) : 0;
           const sqlUna = construirInsertMultiple(tabla, columnas, conflictCol, 1, colTimestamp);
           await client.query(sqlUna, valoresFn(item));
           await client.query('COMMIT');
           insertados++;
+          cambiosRegistrados += previosFila;
         } catch (e2) {
           await client.query('ROLLBACK');
           erroresSql++;
@@ -156,7 +168,7 @@ async function procesarEnLotes(client, items, { tabla, columnas, conflictCol, co
     }
     await actualizarProgresoImport(runId, { fase: tipo, [campoInsertados]: insertados });
   }
-  return { insertados, erroresSql };
+  return { insertados, erroresSql, cambiosRegistrados };
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +258,8 @@ async function ingestAft(runId) {
     await actualizarProgresoImport(runId, { fase: 'stock' });
     stockResult = await procesarEnLotes(client, stockValido, {
       tabla: 'aft_stock_precios', columnas: COLS_STOCK, conflictCol: 'ref', colTimestamp: 'ultima_actualizacion_local',
-      valoresFn: valoresStock, claveErrorFn: (s) => `ref=${s.ref}`, tipo: 'stock', runId, campoInsertados: 'stock_insertado'
+      valoresFn: valoresStock, claveErrorFn: (s) => `ref=${s.ref}`, tipo: 'stock', runId, campoInsertados: 'stock_insertado',
+      antesDeLote: registrarCambiosLote
     });
   } finally {
     client.release();
@@ -267,7 +280,7 @@ async function ingestAft(runId) {
   return {
     categorias: { recibidos: catList.length, insertados: categoriasResult.insertados, duplicados: catDup.length },
     productos: { recibidos: prodList.length, insertados: productosResult.insertados, duplicados: prodDup.length },
-    stockPrecios: { recibidos: stockList.length, insertados: stockResult.insertados, duplicados: stockDup.length, sinCorrespondencia: stockHuerfano.length },
+    stockPrecios: { recibidos: stockList.length, insertados: stockResult.insertados, duplicados: stockDup.length, sinCorrespondencia: stockHuerfano.length, cambiosRegistrados: stockResult.cambiosRegistrados },
     erroresSql: totalErroresSql,
     incidencias: totalIncidencias
   };

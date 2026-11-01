@@ -16,6 +16,7 @@ const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemand
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
+const { consultarHistorial } = require('./src/historialCambios');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -597,6 +598,21 @@ app.get('/api/pipeline-run/estado', basicAuth, async (req, res) => {
     res.json({ ok: true, run: rows[0] || null });
   } catch (e) {
     console.error('[pipeline-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Historial de cambios reales de AFT (coste, PVP sin IVA, stock) por
+// referencia. SOLO LECTURA: un SELECT parametrizado sobre aft_cambios.
+// Filtros opcionales: ref, campo (costo|pvp_sin_iva|stock), desde, hasta
+// (ISO), limite (1-500, 50 por defecto) y offset.
+app.get('/api/historial-cambios', basicAuth, async (req, res) => {
+  try {
+    const datos = await consultarHistorial(pool, req.query);
+    res.json({ ok: true, ...datos });
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ ok: false, error: e.message });
+    console.error('[historial-cambios] Error leyendo el historial:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });
