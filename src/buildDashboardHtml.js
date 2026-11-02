@@ -199,7 +199,13 @@ const datosDesactualizados = !ultimoSync || !ultimoSync.finished_at || (Date.now
 const kpis = [
   { icon: 'layers', bg: '#ECFDF5', color: '#059669', n: ultimoSync ? num(ultimoSync.total_aft_candidatos) : 0, l: 'Referencias AFT analizadas', page: 'actividad' },
   { icon: 'box', bg: '#EFF6FF', color: '#2563EB', n: ultimoSync ? num(ultimoSync.shopify_variantes_leidas) : 0, l: 'Variantes Shopify leídas', page: 'productos' },
-  { icon: 'check', bg: '#ECFDF5', color: '#059669', n: ultimoSync ? num(ultimoSync.total_matched) : 0, l: 'Coincidencias AFT ↔ Shopify', page: 'coincidencias' },
+  // Antes mostraba ultimoSync.total_matched (TODAS las coincidencias
+  // encontradas, incluidas las bloqueadas/con alerta) — un número distinto
+  // al que se ve al pulsar esta misma tarjeta (la página Coincidencias
+  // solo lista las fiables), lo que parecía una discrepancia. Ahora
+  // muestra exactamente matchRows.length: el mismo conteo fiable que la
+  // página de destino, para que la tarjeta nunca contradiga a donde lleva.
+  { icon: 'check', bg: '#ECFDF5', color: '#059669', n: num(matchRows.length), l: 'Coincidencias fiables AFT ↔ Shopify', page: 'coincidencias' },
   { icon: 'activity', bg: '#FFFBEB', color: '#D97706', n: ultimoSync ? num(ultimoSync.total_cambiarian) : 0, l: 'Cambios de stock/precio propuestos', page: 'coincidencias' },
   { icon: 'packageX', bg: '#FEF2F2', color: '#DC2626', n: ultimoSync ? num(ultimoSync.total_a_cero) : 0, l: 'Propuestas a stock cero', page: 'coincidencias' },
   { icon: 'alertTri', bg: '#FFFBEB', color: '#D97706', n: ultimoSync ? num(ultimoSync.total_incidencias) : 0, l: 'Incidencias', page: 'actividad' },
@@ -1094,7 +1100,14 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '.spinner.dark{border:2px solid rgba(0,0,0,0.15);border-top-color:var(--ink);}' +
 '@keyframes spin{to{transform:rotate(360deg);}}' +
 '.hamburger{display:none;margin-left:auto;background:none;border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:16px;cursor:pointer;color:var(--ink);}' +
-'@media(max-width:700px){table thead{display:none;}table,table tbody,table tr,table td{display:block;width:100%;}table tr{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;padding:4px 0;background:#fff;}table td{border-bottom:none;padding:6px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:right;}table td.num{text-align:right;}table td::before{content:attr(data-label);font-size:11px;color:var(--sub);font-weight:600;text-align:left;}table td:empty{display:none;}.table-scroll{overflow-x:visible;}tr.row-detalle td{display:block;text-align:left;}.score-grid{grid-template-columns:1fr;}}' +
+'@media(max-width:700px){table thead{display:none;}table,table tbody,table tr,table td{display:block;width:100%;}table tr{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;padding:4px 0;background:#fff;}table td{border-bottom:none;padding:6px 14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;text-align:right;}' +
+// min-width:0 en un hijo flex es lo que permite que un texto largo (p. ej.
+// la explicación del transporte en Rentabilidad) haga salto de línea en
+// vez de desbordar el ancho de la tarjeta y quedar cortado — sin esto, un
+// hijo flex nunca se encoge por debajo de su contenido sin partir, aunque
+// el texto sí pueda partirse. Antes solo se notaba con texto largo real.
+'table td>*{min-width:0;white-space:normal;}' +
+'table td.num{text-align:right;}table td::before{content:attr(data-label);font-size:11px;color:var(--sub);font-weight:600;text-align:left;flex-shrink:0;}table td:empty{display:none;}.table-scroll{overflow-x:visible;}tr.row-detalle td{display:block;text-align:left;}.score-grid{grid-template-columns:1fr;}}' +
 '@media(max-width:900px){.kpi-row{grid-template-columns:repeat(2,1fr);}.attn-grid{grid-template-columns:1fr;}.bottom-grid{grid-template-columns:1fr;}body{flex-direction:column;}.sidebar{width:100%;min-height:auto;position:relative;}.sb-logo{padding-right:16px;}.hamburger{display:block;}.sb-nav{display:none;margin-top:10px;}.sb-nav.open{display:block;}main{padding:20px;}}' +
 '@media(max-width:480px){.header{flex-direction:column;align-items:stretch;margin-bottom:18px;gap:8px;}.header h1{font-size:19px;}.header .sub{font-size:13px;}.header-right{justify-content:flex-end;gap:10px;margin-top:2px;flex-wrap:wrap;}.updated{font-size:11px;}.sb-logo{padding:0 16px 4px;}.sb-foot{display:none;}.sidebar{padding:12px 0;}main{padding:14px;}.kpi-row{gap:10px;margin-bottom:22px;}.kpi{padding:12px 14px;}.kpi-icon{width:26px;height:26px;margin-bottom:7px;}.kpi-n{font-size:21px;}.kpi-l{font-size:11px;}.filterbar{flex-direction:column;align-items:stretch;}.filterbar input,.filterbar select,.filterbar .filter-select{width:100%;max-width:none!important;}.filter-checkbox{padding:4px 0;}.evo-tab{flex:1;}.blocked-row{padding:9px 12px;}}' +
 '</style></head><body>' +
