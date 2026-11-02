@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { calcularCosteYMargen, normalizar, round2 } = require('../src/sync');
+const { calcularCosteYMargen, normalizar, round2, filaCatalogoDeNodo } = require('../src/sync');
 
 test('round2: redondea a 2 decimales', () => {
   assert.equal(round2(1.005), 1); // float binario real, documenta el comportamiento tal cual
@@ -12,6 +12,22 @@ test('normalizar: mayúsculas y sin acentos', () => {
   assert.equal(normalizar('Amoladora Ángulo'), 'AMOLADORA ANGULO');
   assert.equal(normalizar(null), '');
   assert.equal(normalizar(undefined), '');
+});
+
+test('filaCatalogoDeNodo: captura el handle real del producto (para cruzarlo con Search Console/GA4)', () => {
+  const node = {
+    id: 'gid://shopify/ProductVariant/1', barcode: '840000', sku: 'REF-1', price: '29.90',
+    product: { id: 'gid://shopify/Product/1', title: 'Taladro 18V', vendor: 'Wolfpack', status: 'ACTIVE', handle: 'taladro-18v' },
+    inventoryItem: { id: 'gid://shopify/InventoryItem/1', inventoryLevels: { edges: [] } }
+  };
+  const fila = filaCatalogoDeNodo(node);
+  assert.equal(fila.shopify_handle, 'taladro-18v');
+});
+
+test('filaCatalogoDeNodo: sin producto asociado, el handle queda null, nunca inventado', () => {
+  const node = { id: 'gid://shopify/ProductVariant/2', barcode: null, sku: null, price: null, product: null, inventoryItem: null };
+  const fila = filaCatalogoDeNodo(node);
+  assert.equal(fila.shopify_handle, null);
 });
 
 test('calcularCosteYMargen: IVA 21% aplica el recargo de equivalencia de 5.2% conocido', () => {

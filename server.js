@@ -13,6 +13,7 @@ const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/ren
 const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, obtenerBloqueadosPorMotivo, obtenerUltimaReposicionEfectiva } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
+const { ejecutarAnalisisSeoGoogle, hayIntegracionGoogleConfigurada, hayGa4Configurado, IMPRESIONES_MINIMAS: SEO_GOOGLE_IMPRESIONES_MINIMAS, POSICION_UMBRAL: SEO_GOOGLE_POSICION_UMBRAL } = require('./src/seoGoogle');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
@@ -111,7 +112,8 @@ app.get('/api/shopify-scopes', basicAuth, async (req, res) => {
 const PROCESO_STALE_MS = 2 * 60 * 60 * 1000;
 const TABLA_POR_TIPO = {
   aft_import: 'aft_import_runs', sync: 'sync_runs', rentabilidad: 'rentabilidad_runs', pipeline: 'pipeline_runs',
-  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs', demanda: 'demanda_runs', fichas: 'fichas_runs'
+  reposicion: 'reposicion_runs', oportunidades: 'oportunidades_runs', demanda: 'demanda_runs', fichas: 'fichas_runs',
+  seo_google: 'seo_runs'
 };
 
 async function haySolapamiento() {
@@ -124,6 +126,7 @@ async function haySolapamiento() {
     UNION ALL SELECT 'oportunidades', id, started_at FROM oportunidades_runs WHERE status = 'running'
     UNION ALL SELECT 'demanda', id, started_at FROM demanda_runs WHERE status = 'running'
     UNION ALL SELECT 'fichas', id, started_at FROM fichas_runs WHERE status = 'running'
+    UNION ALL SELECT 'seo_google', id, started_at FROM seo_runs WHERE status = 'running'
     ORDER BY started_at ASC LIMIT 1
   `);
   if (!rows.length) return null;
@@ -420,6 +423,48 @@ app.get('/api/demanda-run/estado', basicAuth, async (req, res) => {
     res.json({ ok: true, run: rows[0] || null });
   } catch (e) {
     console.error('[demanda-run/estado] Error leyendo el progreso:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Agente 7: demanda real de búsqueda (Google Search Console + GA4). Cruza
+// páginas de producto reales con el catálogo (shopify_catalogo.shopify_handle)
+// para priorizar alta demanda/mal posicionada vs alta demanda/bien
+// posicionada. Ruta independiente a propósito: no forma parte de
+// lanzarPipelineCompleto() ni de su cadena diaria AFT->Shopify — solo
+// comparte el mismo candado anti-solapamiento que el resto de agentes bajo
+// demanda (ver haySolapamiento). Sin credenciales de Google configuradas
+// termina con status 'no_conectado' (nunca inventa datos de demanda).
+app.post('/api/seo-google-run', basicAuth, async (req, res) => {
+  try {
+    const enCurso = await haySolapamiento();
+    if (enCurso) {
+      return res.status(409).json({ ok: false, error: `Ya hay un proceso en curso (${enCurso.tipo} #${enCurso.id}).` });
+    }
+
+    const { rows: nuevoRows } = await pool.query(
+      `INSERT INTO seo_runs (status, fase) VALUES ('running', 'iniciando') RETURNING id`
+    );
+    const runId = nuevoRows[0].id;
+
+    res.status(202).json({ ok: true, runId, status: 'running' });
+
+    ejecutarAnalisisSeoGoogle(runId).catch((e) => {
+      console.error('[seo-google-run] Error en el análisis en segundo plano:', e.message);
+      notificarFallo({ agente: 'Demanda SEO (Google)', mensaje: e.message, runId });
+    });
+  } catch (e) {
+    console.error('[seo-google-run] Error al iniciar el análisis:', e.message);
+    if (!res.headersSent) res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/seo-google-run/estado', basicAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM seo_runs ORDER BY id DESC LIMIT 1`);
+    res.json({ ok: true, run: rows[0] || null });
+  } catch (e) {
+    console.error('[seo-google-run/estado] Error leyendo el progreso:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -788,6 +833,19 @@ async function renderDashboard() {
     `SELECT ref, keyword, origen, volumen_busqueda, competencia, verificado FROM demanda_resultados ORDER BY ref, verificado DESC, keyword LIMIT 500`
   );
 
+  // Agente 7 (demanda real Google) — páginas de producto con alta demanda
+  // real de búsqueda (Search Console), cruzadas con el catálogo y, cuando
+  // GA4 está disponible, sus sesiones — mal posicionadas primero (son la
+  // prioridad: demanda real que hoy no se está capturando).
+  const { rows: ultimaSeoGoogleRows } = await pool.query(`SELECT * FROM seo_runs ORDER BY id DESC LIMIT 1`);
+  const ultimaSeoGoogle = ultimaSeoGoogleRows[0] || null;
+  const { rows: seoGoogleResultados } = await pool.query(
+    `SELECT pagina_url, shopify_handle, ref, marca, descripcion, clics, impresiones, ctr, posicion, sesiones_ga4, categoria
+     FROM seo_resultados
+     ORDER BY CASE categoria WHEN 'alta_demanda_mal_posicionada' THEN 0 ELSE 1 END, impresiones DESC NULLS LAST
+     LIMIT 300`
+  );
+
   // Agente 6 (fichas IA) — borradores pendientes de revisión primero,
   // después los ya revisados más recientes. Nunca se publica nada en
   // Shopify desde esta consulta ni desde ninguna ruta de este agente.
@@ -849,6 +907,11 @@ async function renderDashboard() {
     ultimaOportunidades,
     ultimaDemanda, demandaResultados,
     demandaConectada: hayIntegracionDemandaConfigurada(),
+    ultimaSeoGoogle, seoGoogleResultados,
+    seoGoogleConectado: hayIntegracionGoogleConfigurada(),
+    seoGoogleGa4Configurado: hayGa4Configurado(),
+    seoGoogleImpresionesMinimas: SEO_GOOGLE_IMPRESIONES_MINIMAS,
+    seoGooglePosicionUmbral: SEO_GOOGLE_POSICION_UMBRAL,
     ultimaFichas, fichasBorradores,
     iaConectada: hayProveedorIaConfigurado(),
     cambiosRows, cambiosTotal, cambiosAlertas, cambiosRetencion, cambiosRetencionMeses: RETENCION_MESES,

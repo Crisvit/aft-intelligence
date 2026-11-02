@@ -104,7 +104,7 @@ const ALL_VARIANTS_QUERY = `query($first: Int!, $after: String) {
         barcode
         sku
         price
-        product { id title status vendor featuredMedia { preview { image { url } } } }
+        product { id title status vendor handle featuredMedia { preview { image { url } } } }
         inventoryItem {
           id
           unitCost { amount }

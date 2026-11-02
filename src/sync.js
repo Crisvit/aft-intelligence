@@ -467,13 +467,18 @@ function filaCatalogoDeNodo(node) {
     sku: node.sku,
     precio: node.price != null ? Number(node.price) : null,
     stock_ubicacion_principal: stockPrincipalDeNodo(node),
-    imagen_url: node.product && node.product.featuredMedia && node.product.featuredMedia.preview ? node.product.featuredMedia.preview.image.url : null
+    imagen_url: node.product && node.product.featuredMedia && node.product.featuredMedia.preview ? node.product.featuredMedia.preview.image.url : null,
+    // Slug de la URL pública del producto (/products/<handle>) — único dato
+    // que permite cruzar páginas reales de Search Console/GA4 contra el
+    // catálogo sin adivinar: no se deriva del título, se toma tal cual lo
+    // da Shopify.
+    shopify_handle: node.product ? node.product.handle : null
   };
 }
 
 const SHOPIFY_CATALOGO_COLS = [
   'shopify_variant_id', 'shopify_product_id', 'shopify_inventory_item_id', 'titulo', 'vendor_shopify',
-  'estado', 'barcode', 'sku', 'precio', 'stock_ubicacion_principal', 'imagen_url'
+  'estado', 'barcode', 'sku', 'precio', 'stock_ubicacion_principal', 'imagen_url', 'shopify_handle'
 ];
 function valoresCatalogo(fila) {
   return SHOPIFY_CATALOGO_COLS.map((c) => (fila[c] !== undefined ? fila[c] : null));
@@ -756,5 +761,5 @@ async function registrarIncidencia(ref, ean, tipo, detalle) {
 module.exports = {
   ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste,
   BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD,
-  calcularCosteYMargen, normalizar, round2
+  calcularCosteYMargen, normalizar, round2, filaCatalogoDeNodo
 };

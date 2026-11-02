@@ -157,6 +157,14 @@ CREATE TABLE IF NOT EXISTS shopify_catalogo (
   ultima_sync                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Slug de la URL pública del producto (/products/<handle>), tal cual lo da
+-- Shopify — ver src/shopifyClient.js (ALL_VARIANTS_QUERY) y
+-- src/sync.js (filaCatalogoDeNodo). Es el único dato que permite cruzar una
+-- página real de Search Console/GA4 contra el catálogo sin adivinar nada a
+-- partir del título. NULL hasta la próxima sincronización tras este cambio.
+ALTER TABLE shopify_catalogo ADD COLUMN IF NOT EXISTS shopify_handle TEXT;
+CREATE INDEX IF NOT EXISTS idx_shopify_catalogo_handle ON shopify_catalogo (shopify_handle);
+
 CREATE TABLE IF NOT EXISTS incidencias (
   id             SERIAL PRIMARY KEY,
   ref            TEXT,
@@ -532,3 +540,58 @@ CREATE TABLE IF NOT EXISTS fichas_borradores (
 );
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS fichas_run_id INTEGER;
+
+-- Agente 7 — Demanda real (Google Search Console + GA4). Cruza páginas
+-- reales de /products/<handle> (Search Console) y sus sesiones (GA4) con el
+-- catálogo vía shopify_catalogo.shopify_handle, para priorizar qué
+-- productos tienen demanda real de búsqueda pero mala posición SEO.
+--
+-- Deliberadamente NO tiene una columna en pipeline_runs ni se llama desde
+-- lanzarPipelineCompleto(): es un agente bajo demanda, independiente del
+-- pipeline automático diario AFT->Shopify (ver server.js, rutas
+-- /api/seo-google-run) — igual que los demás agentes bajo demanda, pero sin
+-- la columna de enlace que los otros sí tienen, para que "no entra en el
+-- pipeline" sea cierto por la propia estructura de datos, no solo por no
+-- llamarlo desde el código.
+--
+-- Sin GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_SEARCH_CONSOLE_SITE_URL/
+-- GOOGLE_ANALYTICS_PROPERTY_ID configurados, status queda en 'no_conectado'
+-- (nunca 'success' fingiendo datos reales) y no se guarda ninguna fila en
+-- seo_resultados. Ver src/seoGoogle.js.
+CREATE TABLE IF NOT EXISTS seo_runs (
+  id                              SERIAL PRIMARY KEY,
+  started_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at                     TIMESTAMPTZ,
+  status                          TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'success' | 'error' | 'no_conectado'
+  fase                            TEXT,
+  dias_analizados                 INTEGER,
+  total_paginas_gsc                INTEGER DEFAULT 0,
+  total_cruzadas_catalogo          INTEGER DEFAULT 0,
+  alta_demanda_mal_posicionada     INTEGER DEFAULT 0,
+  alta_demanda_bien_posicionada    INTEGER DEFAULT 0,
+  ga4_disponible                   BOOLEAN,
+  error_message                    TEXT
+);
+
+-- Foto de la última ejecución (igual que demanda_resultados/
+-- oportunidades_resultados): solo las filas que superan el umbral de "alta
+-- demanda" configurado (ver SEO_GOOGLE_IMPRESIONES_MINIMAS en .env.example),
+-- ya clasificadas en uno de los dos niveles. sesiones_ga4 queda NULL cuando
+-- GA4 no está configurado o esa página no tuvo sesiones en la ventana.
+CREATE TABLE IF NOT EXISTS seo_resultados (
+  id                SERIAL PRIMARY KEY,
+  run_id            INTEGER REFERENCES seo_runs(id),
+  pagina_url        TEXT NOT NULL,
+  shopify_handle    TEXT,
+  ref               TEXT,
+  marca             TEXT,
+  descripcion       TEXT,
+  clics             INTEGER,
+  impresiones       INTEGER,
+  ctr               NUMERIC,
+  posicion          NUMERIC,
+  sesiones_ga4      INTEGER,
+  categoria         TEXT NOT NULL,  -- 'alta_demanda_mal_posicionada' | 'alta_demanda_bien_posicionada'
+  checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_seo_resultados_run ON seo_resultados (run_id);
