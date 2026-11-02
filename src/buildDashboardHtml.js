@@ -33,6 +33,12 @@ function buildDashboardHtml({
   ultimaDemanda,
   demandaResultados,
   demandaConectada,
+  ultimaSeoGoogle,
+  seoGoogleResultados,
+  seoGoogleConectado,
+  seoGoogleGa4Configurado,
+  seoGoogleImpresionesMinimas,
+  seoGooglePosicionUmbral,
   ultimaFichas,
   fichasBorradores,
   iaConectada,
@@ -556,6 +562,44 @@ const demandaHtml = ultimaDemanda
       : '<div class="empty-state">El último análisis no generó keywords (sin oportunidades del Agente 4 todavía).</div>')
   : '';
 
+// --- Demanda real de búsqueda (Agente 7): Search Console + GA4, cruzadas
+//     con el catálogo por handle de producto. ---
+function filaSeoGoogle(d){
+  const esMalPosicionada = d.categoria === 'alta_demanda_mal_posicionada';
+  const categoriaBadge = esMalPosicionada
+    ? '<span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Alta demanda — mal posicionada</span>'
+    : '<span class="badge badge-ok">Alta demanda — bien posicionada</span>';
+  const producto = d.ref
+    ? esc(d.marca ? d.marca + ' — ' + d.descripcion : d.descripcion) + '<div style="font-size:10.5px;color:var(--sub);">' + esc(d.ref) + '</div>'
+    : '<span style="color:var(--sub);">Sin identificar en el catálogo</span>';
+  return '<tr>' +
+    '<td data-label="Prioridad">' + categoriaBadge + '</td>' +
+    '<td data-label="Producto">' + producto + '</td>' +
+    '<td class="num" data-label="Impresiones">' + (d.impresiones != null ? num(d.impresiones) : '—') + '</td>' +
+    '<td class="num" data-label="Clics">' + (d.clics != null ? num(d.clics) : '—') + '</td>' +
+    '<td class="num" data-label="CTR">' + (d.ctr != null ? (d.ctr * 100).toFixed(1) + '%' : '—') + '</td>' +
+    '<td class="num" data-label="Posición media">' + (d.posicion != null ? Number(d.posicion).toFixed(1) : '—') + '</td>' +
+    '<td class="num" data-label="Sesiones GA4">' + (d.sesiones_ga4 != null ? num(d.sesiones_ga4) : '—') + '</td>' +
+    '<td data-label="Página"><a class="sec-link" href="' + esc(d.pagina_url) + '" target="_blank" rel="noopener">Ver página ' + icon('chevron', 11) + '</a></td>' +
+    '</tr>';
+}
+const seoGoogleResultadosSeguro = seoGoogleResultados || [];
+const seoGoogleMalPosicionadas = seoGoogleResultadosSeguro.filter((d) => d.categoria === 'alta_demanda_mal_posicionada');
+const seoGoogleBienPosicionadas = seoGoogleResultadosSeguro.filter((d) => d.categoria === 'alta_demanda_bien_posicionada');
+const seoGoogleBadgeConexion = seoGoogleConectado
+  ? '<span class="badge badge-ok">Google Search Console conectado' + (seoGoogleGa4Configurado ? ' + GA4' : '') + '</span>'
+  : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>';
+const seoGoogleHtml = ultimaSeoGoogle
+  ? '<h3 style="font-size:14px;margin:32px 0 6px;">Demanda real de búsqueda (Google) ' + seoGoogleBadgeConexion + '</h3>' +
+    '<p style="font-size:11.5px;color:var(--sub);margin:0 0 14px;">Páginas de producto reales con alta demanda de búsqueda en Search Console (≥ ' + num(seoGoogleImpresionesMinimas || 50) + ' impresiones en los últimos ' + num(ultimaSeoGoogle.dias_analizados || 28) + ' días), cruzadas con el catálogo por el handle de Shopify. "Mal posicionada" (posición media > ' + num(seoGooglePosicionUmbral || 10) + ') es la prioridad: demanda real que hoy no se está capturando. Sesiones GA4 solo si esa integración está configurada — nunca un número inventado.</p>' +
+    (seoGoogleResultadosSeguro.length
+      ? '<div class="table-note">' + pl(seoGoogleMalPosicionadas.length, 'página mal posicionada', 'páginas mal posicionadas') + ' · ' + pl(seoGoogleBienPosicionadas.length, 'página bien posicionada', 'páginas bien posicionadas') + ' de alta demanda real' + (ultimaSeoGoogle.finished_at ? ' (' + tiempoRelativo(ultimaSeoGoogle.finished_at) + ')' : '') + '</div>' +
+        '<div class="table-scroll"><table><thead><tr><th>Prioridad</th><th>Producto</th><th>Impresiones</th><th>Clics</th><th>CTR</th><th>Posición media</th><th>Sesiones GA4</th><th>Página</th></tr></thead><tbody>' +
+        seoGoogleResultadosSeguro.map(filaSeoGoogle).join('') +
+        '</tbody></table></div>'
+      : '<div class="empty-state">' + (seoGoogleConectado ? 'El último análisis no encontró páginas de producto con suficiente demanda real en el periodo analizado.' : 'Sin GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_SEARCH_CONSOLE_SITE_URL configurados, no hay demanda real de Search Console que analizar.') + '</div>')
+  : '';
+
 // --- Página Cambios AFT: historial real de coste/PVP/stock por referencia
 //     (ver src/historialCambios.js) — SOLO LECTURA, nunca escribe en AFT ni
 //     en Shopify. Alertas cuando el COSTE sube un 10% o más (configurable,
@@ -908,6 +952,14 @@ function estadoDemanda(){
   return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaDemanda.finished_at) };
 }
 const eDem = estadoDemanda();
+function estadoSeoGoogle(){
+  if (!ultimaSeoGoogle) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
+  if (ultimaSeoGoogle.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
+  if (ultimaSeoGoogle.status === 'error') return { dot: 'dot-err', texto: 'Error en el último análisis' };
+  if (ultimaSeoGoogle.status === 'no_conectado') return { dot: 'dot-warn', texto: 'Sin Google Search Console conectado' };
+  return { dot: 'dot-ok', texto: 'Actualizado ' + tiempoRelativo(ultimaSeoGoogle.finished_at) };
+}
+const eSeoGoogle = estadoSeoGoogle();
 function estadoFichas(){
   if (!ultimaFichas) return { dot: 'dot-warn', texto: 'Nunca ejecutado' };
   if (ultimaFichas.status === 'running') return { dot: 'dot-warn', texto: 'En curso…' };
@@ -973,6 +1025,12 @@ const integracionesHtml =
     '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarDemanda(this)">Analizar demanda</button><span id="demResultado" class="integ-sub"></span></div>' +
     (ultimaDemanda ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaDemanda.total_keywords) + ' keywords candidatas · ' + num(ultimaDemanda.verificadas) + ' con volumen real (DataForSEO) · ' + num(ultimaDemanda.sugeridas_sin_verificar) + ' sugeridas sin verificar</div>' : '') +
     '<div class="integ-sub" style="margin-top:8px;">' + (demandaConectada ? 'DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD configurados — consulta volumen de búsqueda y competencia reales.' : 'Sin DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD, solo genera candidatos de keyword a partir del catálogo (marca+categoría+descripción), siempre marcados "sin verificar" — nunca un volumen de búsqueda inventado.') + '</div>' +
+  '</div>' +
+  '<div class="integ-card">' +
+    '<div class="integ-row"><span class="dot ' + eSeoGoogle.dot + '" id="seoGoogleEstadoDot"></span><div><div class="integ-name">Demanda real de búsqueda (Google) ' + (seoGoogleConectado ? '<span class="badge badge-ok">Search Console conectado' + (seoGoogleGa4Configurado ? ' + GA4' : '') + '</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</div><div class="integ-sub">Agente 7 — cruza páginas de producto reales (Search Console) con el catálogo por handle de Shopify; sesiones GA4 cuando esa integración está configurada. No forma parte del pipeline automático diario.</div></div><span class="integ-status" id="seoGoogleEstadoTexto">' + esc(eSeoGoogle.texto) + '</span></div>' +
+    '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><button class="btn-solid btn-sm" onclick="ejecutarSeoGoogle(this)">Analizar demanda real (Google)</button><span id="seoGoogleResultado" class="integ-sub"></span></div>' +
+    (ultimaSeoGoogle && ultimaSeoGoogle.status === 'success' ? '<div class="integ-sub" style="margin-top:8px;">Última: ' + num(ultimaSeoGoogle.total_paginas_gsc) + ' páginas leídas de Search Console · ' + num(ultimaSeoGoogle.total_cruzadas_catalogo) + ' cruzadas con el catálogo · <strong>' + num(ultimaSeoGoogle.alta_demanda_mal_posicionada) + ' de alta demanda mal posicionadas</strong> · ' + num(ultimaSeoGoogle.alta_demanda_bien_posicionada) + ' de alta demanda bien posicionadas' + (ultimaSeoGoogle.ga4_disponible === false && seoGoogleGa4Configurado ? ' (GA4 configurado pero no disponible en esta ejecución)' : '') + '</div>' : '') +
+    '<div class="integ-sub" style="margin-top:8px;">' + (seoGoogleConectado ? 'GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_SEARCH_CONSOLE_SITE_URL configurados — consulta impresiones/clics/posición reales de Search Console.' + (seoGoogleGa4Configurado ? ' GOOGLE_ANALYTICS_PROPERTY_ID configurado — añade sesiones reales de GA4.' : ' Sin GOOGLE_ANALYTICS_PROPERTY_ID, sin sesiones GA4 (solo Search Console).') : 'Sin GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_SEARCH_CONSOLE_SITE_URL, este agente no tiene ninguna fuente real que analizar — nunca simula demanda de búsqueda.') + '</div>' +
   '</div>' +
   '<div class="integ-card">' +
     '<div class="integ-row"><span class="dot ' + eFichas.dot + '" id="fichasEstadoDot"></span><div><div class="integ-name">Fichas de producto con IA ' + (iaConectada ? '<span class="badge badge-ok">IA conectada</span>' : '<span class="badge badge-off" style="background:#F3F4F6;color:#6B7280;">No conectado</span>') + '</div><div class="integ-sub">Agente 6 — título, descripción y SEO a partir de AFT + Oportunidades; revisión humana obligatoria, nunca publica en Shopify</div></div><span class="integ-status" id="fichasEstadoTexto">' + esc(eFichas.texto) + '</span></div>' +
@@ -1147,7 +1205,7 @@ sincronizacionHtml +
 
 '<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + bloqueadasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
 
-'<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
+'<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + seoGoogleHtml + '</div>' +
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
@@ -1232,6 +1290,11 @@ fichasHtml +
 'function formatearFaseDem(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin fuente conectada: "+(run.total_keywords||0)+" keywords sugeridas (sin verificar).";}if(run.status==="success"){return "Keywords: "+(run.total_keywords||0)+" \\u00b7 Con volumen real: "+(run.verificadas||0)+" \\u00b7 Sin verificar: "+(run.sugeridas_sin_verificar||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
 'function pollDemEstado(btn,out){pararPollDem();demPollTimer=setInterval(function(){fetch("/api/demanda-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseDem(run);if(!run||run.status==="running"){return;}pararPollDem();btn.disabled=false;btn.textContent="Analizar demanda";if(run.status==="success"){if(out)out.style.color="#059669";}else if(run.status==="no_conectado"){if(out)out.style.color="#D97706";}else{if(out)out.style.color="#DC2626";}var dot=document.getElementById("demEstadoDot");if(dot)dot.className="dot "+(run.status==="error"?"dot-err":"dot-ok");location.reload();}).catch(function(){});},2000);}' +
 'function ejecutarDemanda(btn){pararPollDem();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("demResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/demanda-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollDemEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollDemEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar demanda";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
+'var seoGooglePollTimer=null;' +
+'function pararPollSeoGoogle(){if(seoGooglePollTimer){clearInterval(seoGooglePollTimer);seoGooglePollTimer=null;}}' +
+'function formatearFaseSeoGoogle(run){if(!run)return "Iniciando...";if(run.status==="running")return "Analizando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin Google Search Console conectado.";}if(run.status==="success"){return "Páginas: "+(run.total_paginas_gsc||0)+" \\u00b7 Alta demanda mal posicionada: "+(run.alta_demanda_mal_posicionada||0)+" \\u00b7 Bien posicionada: "+(run.alta_demanda_bien_posicionada||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
+'function pollSeoGoogleEstado(btn,out){pararPollSeoGoogle();seoGooglePollTimer=setInterval(function(){fetch("/api/seo-google-run/estado").then(function(r){return r.json();}).then(function(data){var run=data.run;if(out)out.textContent=formatearFaseSeoGoogle(run);if(!run||run.status==="running"){return;}pararPollSeoGoogle();btn.disabled=false;btn.textContent="Analizar demanda real (Google)";if(run.status==="success"){if(out)out.style.color="#059669";}else if(run.status==="no_conectado"){if(out)out.style.color="#D97706";}else{if(out)out.style.color="#DC2626";}var dot=document.getElementById("seoGoogleEstadoDot");if(dot)dot.className="dot "+(run.status==="error"?"dot-err":"dot-ok");location.reload();}).catch(function(){});},2000);}' +
+'function ejecutarSeoGoogle(btn){pararPollSeoGoogle();btn.disabled=true;btn.innerHTML="<span class=\\"spinner dark\\"></span>Analizando...";var out=document.getElementById("seoGoogleResultado");if(out){out.textContent="";out.style.color="";}fetch("/api/seo-google-run",{method:"POST"}).then(function(r){return r.json().then(function(data){return {status:r.status,data:data};});}).then(function(res){if(res.status===202&&res.data&&res.data.ok){pollSeoGoogleEstado(btn,out);}else if(res.status===409){if(out){out.textContent="Ya hay un proceso en curso, mostrando su progreso...";out.style.color="#D97706";}pollSeoGoogleEstado(btn,out);}else{btn.disabled=false;btn.textContent="Analizar demanda real (Google)";if(out){out.textContent="Error: "+(res.data&&res.data.error?res.data.error:"desconocido");out.style.color="#DC2626";}}}).catch(function(){btn.disabled=false;btn.textContent="Analizar demanda real (Google)";if(out){out.textContent="Error de red al contactar con el servidor.";out.style.color="#DC2626";}});}' +
 'var fichasPollTimer=null;' +
 'function pararPollFichas(){if(fichasPollTimer){clearInterval(fichasPollTimer);fichasPollTimer=null;}}' +
 'function formatearFaseFichas(run){if(!run)return "Iniciando...";if(run.status==="running")return "Generando: "+(run.fase||"procesando")+"...";if(run.status==="no_conectado"){return "Sin proveedor de IA conectado: "+(run.total_candidatos||0)+" candidatos, 0 generados.";}if(run.status==="success"){return "Candidatos: "+(run.total_candidatos||0)+" \\u00b7 Generados: "+(run.generados||0)+" \\u00b7 Con avisos de calidad: "+(run.con_avisos_calidad||0);}if(run.status==="error"){return "Error: "+(run.error_message||"desconocido");}return "";}' +
