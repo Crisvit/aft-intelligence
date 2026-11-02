@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS incidencias (
   detectado_en   TIMESTAMPTZ NOT NULL DEFAULT now(),
   estado         TEXT NOT NULL DEFAULT 'pendiente'
 );
+-- Soporta la comprobación de deduplicación en src/sync.js
+-- (registrarIncidencia): antes de insertar, se busca una incidencia
+-- pendiente idéntica (mismo tipo/ref) ya existente.
+CREATE INDEX IF NOT EXISTS idx_incidencias_dedup ON incidencias (tipo, ref, estado);
 
 CREATE TABLE IF NOT EXISTS sync_lock (
   lock_key    TEXT PRIMARY KEY,
