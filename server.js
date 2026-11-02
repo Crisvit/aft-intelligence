@@ -6,7 +6,7 @@
 // explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const { credencialesValidas, puedeIntentar, registrarIntentoFallido, registrarExito } = require('./src/authSeguridad');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
@@ -32,10 +32,23 @@ const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').to
 const DASHBOARD_USER = process.env.DASHBOARD_USER;
 const DASHBOARD_PASSWORD_HASH = process.env.DASHBOARD_PASSWORD_HASH;
 
+// IP del cliente para el límite de intentos — igual criterio que el resto
+// del panel: real detrás de un proxy TLS-terminating (Easypanel) solo si
+// 'trust proxy' está configurado; sin eso, req.ip ya es la IP real cuando
+// no hay proxy. Nunca decide autenticación, solo acota los intentos.
+function ipCliente(req) {
+  return req.ip || (req.socket && req.socket.remoteAddress) || 'desconocida';
+}
+
 function basicAuth(req, res, next) {
   if (!DASHBOARD_USER || !DASHBOARD_PASSWORD_HASH) {
     res.status(500).send('Faltan DASHBOARD_USER / DASHBOARD_PASSWORD_HASH en el entorno.');
     return;
+  }
+  const ip = ipCliente(req);
+  if (!puedeIntentar(ip)) {
+    res.set('Retry-After', '300');
+    return res.status(429).send('Demasiados intentos. Vuelve a intentarlo en unos minutos.');
   }
   const header = req.headers.authorization || '';
   const [scheme, encoded] = header.split(' ');
@@ -47,10 +60,12 @@ function basicAuth(req, res, next) {
   const idx = decoded.indexOf(':');
   const user = decoded.slice(0, idx);
   const pass = decoded.slice(idx + 1);
-  if (user !== DASHBOARD_USER || !bcrypt.compareSync(pass, DASHBOARD_PASSWORD_HASH)) {
+  if (!credencialesValidas(user, pass, { dashboardUser: DASHBOARD_USER, dashboardPasswordHash: DASHBOARD_PASSWORD_HASH })) {
+    registrarIntentoFallido(ip);
     res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
     return res.status(401).send('Credenciales incorrectas.');
   }
+  registrarExito(ip);
   req.dashboardUser = user;
   next();
 }
