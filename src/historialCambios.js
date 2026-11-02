@@ -215,9 +215,31 @@ async function contarPendientesDeRetencion(pool, meses = RETENCION_MESES) {
   return { meses, corte: corte.toISOString(), pendientesDePurga: rows[0].total };
 }
 
+// SOLO LECTURA: cuántos cambios reales detectó AFT cada día (coste, PVP
+// sin IVA, stock), hora de Madrid — para el gráfico de evolución de la
+// página «Cambios AFT». Nunca un valor por referencia individual: es un
+// recuento de actividad detectada, no una serie de precios. Sin historial
+// en la ventana pedida, devuelve un array vacío — «Sin datos», nunca un
+// cero inventado donde no se ha detectado nada todavía.
+async function evolucionDiaria(pool, dias = 30) {
+  const diasSeguro = Math.min(Math.max(parseInt(dias, 10) || 30, 1), 90);
+  const { rows } = await pool.query(
+    `SELECT (detectado_en AT TIME ZONE 'Europe/Madrid')::date AS dia,
+            COUNT(*) FILTER (WHERE campo = 'costo')::int AS coste,
+            COUNT(*) FILTER (WHERE campo = 'pvp_sin_iva')::int AS pvp,
+            COUNT(*) FILTER (WHERE campo = 'stock')::int AS stock
+     FROM aft_cambios
+     WHERE detectado_en >= now() - ($1 || ' days')::interval
+     GROUP BY 1
+     ORDER BY 1`,
+    [diasSeguro]
+  );
+  return rows;
+}
+
 module.exports = {
   CAMPOS, EPSILON_IMPORTE, UMBRAL_ALERTA_COSTE_PCT, RETENCION_MESES,
   detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros, filaDesdeValoresStock,
   pctVariacion, esAlertaSubidaCoste, filtrarAlertasSubidaCoste, listarAlertasSubidaCoste,
-  fechaCorteRetencion, contarPendientesDeRetencion
+  fechaCorteRetencion, contarPendientesDeRetencion, evolucionDiaria
 };
