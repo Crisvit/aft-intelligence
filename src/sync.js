@@ -746,9 +746,26 @@ async function runInventorySync(existingRunId) {
   }
 }
 
+// Sin deduplicar, una condición persistente sin resolver (p. ej. un permiso
+// de Shopify que sigue faltando, o una ref de AFT que sigue sin encontrar
+// correspondencia) generaba una incidencia NUEVA en cada ejecución del
+// pipeline, para siempre — nunca hay en este repositorio una ruta que
+// cambie incidencias.estado de 'pendiente' a otra cosa, así que la tabla
+// solo podía crecer. El número de incidencias "pendientes" dejaba de medir
+// problemas reales distintos y pasaba a medir, en la práctica, cuántas
+// veces se había ejecutado el pipeline. Esta función ahora NO inserta una
+// copia de una incidencia pendiente idéntica (mismo ref/tipo/detalle) que
+// ya existe — ni borra ni modifica ninguna fila existente, solo evita
+// seguir acumulando duplicados exactos hacia delante.
 async function registrarIncidencia(ref, ean, tipo, detalle) {
   await pool.query(
-    `INSERT INTO incidencias (ref, ean, tipo, detalle) VALUES ($1,$2,$3,$4)`,
+    `INSERT INTO incidencias (ref, ean, tipo, detalle)
+     SELECT $1, $2, $3, $4
+     WHERE NOT EXISTS (
+       SELECT 1 FROM incidencias
+       WHERE tipo = $3 AND detalle = $4 AND estado = 'pendiente'
+         AND ref IS NOT DISTINCT FROM $1
+     )`,
     [ref, ean, tipo, detalle]
   );
 }
@@ -756,5 +773,5 @@ async function registrarIncidencia(ref, ean, tipo, detalle) {
 module.exports = {
   ingestAft, runInventorySync, getCandidatosConCoste, getTodasLasReferenciasConCoste,
   BRANDS_PRIORITARIAS, STOCK_MINIMO_OPORTUNIDAD,
-  calcularCosteYMargen, normalizar, round2
+  calcularCosteYMargen, normalizar, round2, registrarIncidencia, dedupPorClave
 };
