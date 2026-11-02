@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {
   detectarCambios, registrarCambiosLote, consultarHistorial, normalizarFiltros,
   pctVariacion, esAlertaSubidaCoste, filtrarAlertasSubidaCoste, listarAlertasSubidaCoste,
-  fechaCorteRetencion, contarPendientesDeRetencion, UMBRAL_ALERTA_COSTE_PCT, RETENCION_MESES
+  fechaCorteRetencion, contarPendientesDeRetencion, evolucionDiaria, UMBRAL_ALERTA_COSTE_PCT, RETENCION_MESES
 } = require('../src/historialCambios');
 
 const previos = (obj) => new Map(Object.entries(obj));
@@ -226,4 +226,36 @@ test('contarPendientesDeRetencion: usa RETENCION_MESES (12) cuando no se especif
   };
   const r = await contarPendientesDeRetencion(pool);
   assert.equal(r.meses, 12);
+});
+
+test('evolucionDiaria: es una consulta de SOLO LECTURA, agrupada por día y campo', async () => {
+  const llamadas = [];
+  const pool = {
+    query: async (sql, params) => {
+      llamadas.push({ sql, params });
+      return { rows: [{ dia: new Date('2026-10-20'), coste: 2, pvp: 1, stock: 5 }] };
+    }
+  };
+  const filas = await evolucionDiaria(pool, 7);
+  assert.equal(llamadas.length, 1);
+  assert.match(llamadas[0].sql, /^\s*SELECT/i);
+  assert.doesNotMatch(llamadas[0].sql, /INSERT|UPDATE|DELETE/i);
+  assert.match(llamadas[0].sql, /FROM aft_cambios/);
+  assert.deepEqual(llamadas[0].params, [7]);
+  assert.equal(filas.length, 1);
+  assert.equal(filas[0].coste, 2);
+});
+
+test('evolucionDiaria: días fuera de rango se acotan entre 1 y 90 (por defecto 30)', async () => {
+  const llamadas = [];
+  const pool = { query: async (sql, params) => { llamadas.push(params[0]); return { rows: [] }; } };
+  await evolucionDiaria(pool);
+  await evolucionDiaria(pool, 500);
+  assert.deepEqual(llamadas, [30, 90]);
+});
+
+test('evolucionDiaria: sin ningún cambio detectado en la ventana, devuelve un array vacío (nunca un cero inventado)', async () => {
+  const pool = { query: async () => ({ rows: [] }) };
+  const filas = await evolucionDiaria(pool, 30);
+  assert.deepEqual(filas, []);
 });

@@ -6,7 +6,7 @@
 // explícitamente autorizado — ver src/reposicion.js.
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const { credencialesValidas, puedeIntentar, registrarIntentoFallido, registrarExito } = require('./src/authSeguridad');
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
@@ -17,7 +17,8 @@ const { ejecutarAnalisisSeoGoogle, hayIntegracionGoogleConfigurada, hayGa4Config
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
 const shopify = require('./src/shopifyClient');
 const shopifyWrite = require('./src/shopifyWriteClient');
-const { consultarHistorial, listarAlertasSubidaCoste, contarPendientesDeRetencion, RETENCION_MESES, UMBRAL_ALERTA_COSTE_PCT } = require('./src/historialCambios');
+const { consultarHistorial, listarAlertasSubidaCoste, contarPendientesDeRetencion, evolucionDiaria, RETENCION_MESES, UMBRAL_ALERTA_COSTE_PCT } = require('./src/historialCambios');
+const { obtenerEvolucionReposicion, obtenerReferenciasBloqueadas, obtenerUltimoEventoPorRef } = require('./src/metricas');
 const { notificarFallo } = require('./src/alertas');
 const { buildDashboardHtml } = require('./src/buildDashboardHtml');
 
@@ -32,10 +33,23 @@ const SHOPIFY_WRITE_ENABLED = String(process.env.SHOPIFY_WRITE_ENABLED || '').to
 const DASHBOARD_USER = process.env.DASHBOARD_USER;
 const DASHBOARD_PASSWORD_HASH = process.env.DASHBOARD_PASSWORD_HASH;
 
+// IP del cliente para el límite de intentos — igual criterio que el resto
+// del panel: real detrás de un proxy TLS-terminating (Easypanel) solo si
+// 'trust proxy' está configurado; sin eso, req.ip ya es la IP real cuando
+// no hay proxy. Nunca decide autenticación, solo acota los intentos.
+function ipCliente(req) {
+  return req.ip || (req.socket && req.socket.remoteAddress) || 'desconocida';
+}
+
 function basicAuth(req, res, next) {
   if (!DASHBOARD_USER || !DASHBOARD_PASSWORD_HASH) {
     res.status(500).send('Faltan DASHBOARD_USER / DASHBOARD_PASSWORD_HASH en el entorno.');
     return;
+  }
+  const ip = ipCliente(req);
+  if (!puedeIntentar(ip)) {
+    res.set('Retry-After', '300');
+    return res.status(429).send('Demasiados intentos. Vuelve a intentarlo en unos minutos.');
   }
   const header = req.headers.authorization || '';
   const [scheme, encoded] = header.split(' ');
@@ -47,10 +61,12 @@ function basicAuth(req, res, next) {
   const idx = decoded.indexOf(':');
   const user = decoded.slice(0, idx);
   const pass = decoded.slice(idx + 1);
-  if (user !== DASHBOARD_USER || !bcrypt.compareSync(pass, DASHBOARD_PASSWORD_HASH)) {
+  if (!credencialesValidas(user, pass, { dashboardUser: DASHBOARD_USER, dashboardPasswordHash: DASHBOARD_PASSWORD_HASH })) {
+    registrarIntentoFallido(ip);
     res.set('WWW-Authenticate', 'Basic realm="AFT Intelligence"');
     return res.status(401).send('Credenciales incorrectas.');
   }
+  registrarExito(ip);
   req.dashboardUser = user;
   next();
 }
@@ -783,6 +799,12 @@ async function renderDashboard() {
   // shopify_product_id viene de shopify_catalogo (vía shopify_variant_id,
   // ya guardado en shopify_match) para poder enlazar "Ver en Shopify" al
   // producto correcto — nunca a la variante, que no abre ficha en el admin.
+  // El comentario de arriba decía "fiables" pero el WHERE no lo exigía
+  // todavía — lo corregimos aquí (nunca en src/reposicion.js) para que esta
+  // tabla muestre de verdad solo coincidencias fiables; las que no lo son
+  // se listan aparte en referenciasBloqueadas (ver src/metricas.js), con su
+  // motivo. ORDER BY: primero las referencias con AFT=0 y Shopify todavía
+  // disponible (el caso más urgente), igual que prioriza el agente real.
   const { rows: matchRows } = await pool.query(
     `SELECT sm.ref, c.descripcion_corta AS descripcion, c.marca AS marca_aft, sm.matched_by,
             sm.stock_aft, sm.shopify_stock, sm.stock_diferencia,
@@ -792,7 +814,12 @@ async function renderDashboard() {
      LEFT JOIN aft_catalogo c ON c.ref = sm.ref
      LEFT JOIN shopify_catalogo sc ON sc.shopify_variant_id = sm.shopify_variant_id
      WHERE sm.estado IN ('cambiaria','a_cero','sin_cambio')
-     ORDER BY sm.estado, sm.ref`
+       AND sm.matched_by IN ('ean','sku')
+       AND sm.alerta_duplicado = false AND sm.alerta_multiples_ubicaciones = false
+       AND sm.alerta_ubicacion_no_encontrada = false AND sm.bloquear_escritura = false
+       AND sm.shopify_inventory_item_id IS NOT NULL AND sm.shopify_stock IS NOT NULL
+       AND sm.stock_aft IS NOT NULL AND sm.stock_aft >= 0
+     ORDER BY (CASE WHEN sm.stock_aft = 0 AND sm.shopify_stock > 0 THEN 0 ELSE 1 END), sm.estado, sm.ref`
   );
 
   const { rows: incidenciaRows } = await pool.query(
@@ -895,6 +922,14 @@ async function renderDashboard() {
   const { cambios: cambiosRows, total: cambiosTotal } = await consultarHistorial(pool, { limite: 100, offset: 0 });
   const cambiosAlertas = await listarAlertasSubidaCoste(pool, { limite: 50 });
   const cambiosRetencion = await contarPendientesDeRetencion(pool);
+  const cambiosEvolucion = await evolucionDiaria(pool, 30);
+
+  // Nuevo panel SaaS (Inicio/Coincidencias) — consultas de solo lectura
+  // aparte en src/metricas.js, ver ese archivo. Nada de esto cambia el
+  // comportamiento del agente de reposición ni del pipeline diario.
+  const reposicionEvolucion = await obtenerEvolucionReposicion(30);
+  const referenciasBloqueadas = await obtenerReferenciasBloqueadas(200);
+  const ultimoEventoPorRef = await obtenerUltimoEventoPorRef();
 
   const html = buildDashboardHtml({
     productosShopify, ultimoSync, ultimaImport, matchRows, incidenciaRows, oportunidadRows, historialSyncRows,
@@ -903,6 +938,7 @@ async function renderDashboard() {
     stockMinimoOportunidad: STOCK_MINIMO_OPORTUNIDAD,
     totalesCatalogo, shopifyAdminStore,
     ultimaReposicion, reposicionEventos, ultimaReposicionEfectiva, reposicionBloqueados,
+    reposicionEvolucion, referenciasBloqueadas, ultimoEventoPorRef,
     shopifyWriteEnabled: SHOPIFY_WRITE_ENABLED,
     ultimaOportunidades,
     ultimaDemanda, demandaResultados,
@@ -915,7 +951,7 @@ async function renderDashboard() {
     ultimaFichas, fichasBorradores,
     iaConectada: hayProveedorIaConfigurado(),
     cambiosRows, cambiosTotal, cambiosAlertas, cambiosRetencion, cambiosRetencionMeses: RETENCION_MESES,
-    cambiosUmbralAlertaPct: UMBRAL_ALERTA_COSTE_PCT
+    cambiosUmbralAlertaPct: UMBRAL_ALERTA_COSTE_PCT, cambiosEvolucion
   });
 
   cache = { html, builtAt: now };
