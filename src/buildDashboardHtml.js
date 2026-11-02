@@ -25,6 +25,9 @@ function buildDashboardHtml({
   reposicionEventos,
   ultimaReposicionEfectiva,
   reposicionBloqueados,
+  reposicionEvolucion,
+  referenciasBloqueadas,
+  ultimoEventoPorRef,
   shopifyWriteEnabled,
   ultimaOportunidades,
   ultimaDemanda,
@@ -38,7 +41,8 @@ function buildDashboardHtml({
   cambiosAlertas,
   cambiosRetencion,
   cambiosRetencionMeses,
-  cambiosUmbralAlertaPct
+  cambiosUmbralAlertaPct,
+  cambiosEvolucion
 }) {
 
 // DRY RUN mientras SHOPIFY_WRITE_ENABLED no esté activo (el estado real,
@@ -95,6 +99,55 @@ const ICON = {
   fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>'
 };
 function icon(name, size, color){ return '<svg width="'+(size||16)+'" height="'+(size||16)+'" viewBox="0 0 24 24" fill="none" stroke="'+(color||'currentColor')+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>'; }
+
+function fechaCorta(dia) {
+  const f = dia instanceof Date ? dia : new Date(dia);
+  if (isNaN(f.getTime())) return '';
+  return f.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
+}
+// Gráfico de evolución — barras apiladas dibujadas como SVG inline, sin
+// ninguna librería externa ni <script> añadido: nunca puede afectar al
+// tiempo de carga del panel, y mucho menos al pipeline (proceso aparte,
+// que no ejecuta ni una línea de esta función). Quien llama decide si no
+// hay ningún día con datos — esta función nunca inventa un cero donde no
+// hubo ninguna ejecución.
+function graficoBarrasApiladas({ dias, claves, colores, etiquetas, alto }) {
+  const ALTO = alto || 130;
+  const ANCHO = 600;
+  const MARGEN_IZQ = 6, MARGEN_INF = 20, MARGEN_SUP = 8;
+  const areaAlto = ALTO - MARGEN_INF - MARGEN_SUP;
+  const paso = (ANCHO - MARGEN_IZQ - 10) / Math.max(dias.length, 1);
+  const anchoBarra = Math.min(28, paso * 0.6);
+  const maxTotal = Math.max(1, ...dias.map((d) => claves.reduce((s, k) => s + Number(d[k] || 0), 0)));
+  const cadaCuantos = dias.length <= 10 ? 1 : Math.ceil(dias.length / 8);
+
+  const barras = dias.map((d, i) => {
+    const x = MARGEN_IZQ + i * paso + (paso - anchoBarra) / 2;
+    let yAcum = 0;
+    const segmentos = claves.map((k) => {
+      const v = Number(d[k] || 0);
+      if (v <= 0) return '';
+      const h = Math.max(areaAlto * (v / maxTotal), 1.5);
+      const y = MARGEN_SUP + (areaAlto - yAcum - h);
+      yAcum += h;
+      return '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + anchoBarra.toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + colores[k] + '" rx="1.5"/>';
+    }).join('');
+    const fechaStr = fechaCorta(d.dia);
+    const titulo = '<title>' + esc(fechaStr) + ': ' + claves.map((k) => esc(etiquetas[k]) + ' ' + num(d[k])).join(', ') + '</title>';
+    const etiquetaEje = (i % cadaCuantos === 0)
+      ? '<text x="' + (x + anchoBarra / 2).toFixed(1) + '" y="' + (ALTO - 4) + '" font-size="8.5" text-anchor="middle" fill="var(--sub)">' + esc(fechaStr) + '</text>'
+      : '';
+    return '<g>' + titulo + segmentos + etiquetaEje + '</g>';
+  }).join('');
+
+  const leyenda = claves.map((k) =>
+    '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:14px;">' +
+    '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + colores[k] + ';"></span>' + esc(etiquetas[k]) + '</span>'
+  ).join('');
+
+  return '<svg viewBox="0 0 ' + ANCHO + ' ' + ALTO + '" style="width:100%;height:' + ALTO + 'px;display:block;" role="img" aria-label="Gráfico de evolución">' + barras + '</svg>' +
+    '<div style="margin-top:6px;font-size:11px;color:var(--sub);">' + leyenda + '</div>';
+}
 
 // AFT no tiene (todavía) una URL de producto pública confirmada — no se
 // inventa una (eso es lo que daba enlaces en blanco antes). Mientras no
@@ -153,6 +206,49 @@ const kpis = [
   { icon: 'packageX', bg: '#FEF2F2', color: '#DC2626', n: ultimaRentabilidad ? num(ultimaRentabilidad.en_perdida) : 0, l: 'Productos en pérdida estimada', page: 'rentabilidad' },
   { icon: 'alertTri', bg: '#FFFBEB', color: '#D97706', n: ultimaRentabilidad ? num(ultimaRentabilidad.margen_bajo) : 0, l: 'Productos con margen bajo', page: 'rentabilidad' }
 ];
+// --- Sincronización de inventario AFT -> Shopify: tarjetas con datos
+//     reales de reposicion_runs (nunca inventados) + evolución 7/30 días.
+//     "actualizado" = escritura real confirmada en Shopify; "simulado" =
+//     solo calculado (dry run); "bloqueado" = referencias que no pudieron
+//     ni siquiera entrar como candidatas (ver src/metricas.js); "errores" =
+//     fallos reales, nunca ocultos bajo un status "completa". ---
+const sincTarjetas = [
+  { n: ultimaReposicion ? num(ultimaReposicion.actualizados) : 'Sin datos', l: 'Actualizado de verdad en Shopify', color: '#059669', bg: '#ECFDF5' },
+  { n: ultimaReposicion ? num(ultimaReposicion.simulados) : 'Sin datos', l: 'Simulado (dry run, sin escribir)', color: '#6B7280', bg: '#F3F4F6' },
+  { n: referenciasBloqueadas ? num(referenciasBloqueadas.length) : 'Sin datos', l: 'Bloqueadas (no candidatas)', color: '#D97706', bg: '#FFFBEB' },
+  { n: ultimaReposicion ? num(ultimaReposicion.errores) : 'Sin datos', l: 'Errores reales', color: '#DC2626', bg: '#FEF2F2' }
+];
+const sincTarjetasHtml = sincTarjetas.map((t) =>
+  '<div class="kpi" style="background:' + t.bg + ';"><div class="kpi-n" style="color:' + t.color + ';">' + t.n + '</div><div class="kpi-l">' + esc(t.l) + '</div></div>'
+).join('');
+const sincUltimaEjecucionHtml = ultimaReposicion
+  ? '<div><strong>Última ejecución:</strong> ' + esc(tiempoRelativo(ultimaReposicion.finished_at)) + (ultimaReposicion.status === 'parcial' ? ' <span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Parcial, con errores</span>' : (ultimaReposicion.status === 'error' ? ' <span class="badge badge-off" style="background:#FEF2F2;color:#DC2626;">Error</span>' : ' <span class="badge badge-ok">Completa</span>')) + '</div>'
+  : '<div><strong>Última ejecución:</strong> Sin datos — todavía no se ha ejecutado la reposición.</div>';
+const sincUltimaEfectivaHtml = ultimaReposicionEfectiva
+  ? '<div><strong>Última escritura real verificada:</strong> ' + esc(tiempoRelativo(ultimaReposicionEfectiva.finished_at)) + ' (' + num(ultimaReposicionEfectiva.actualizados) + ' actualizados)</div>'
+  : '<div><strong>Última escritura real verificada:</strong> <span style="color:#B45309;">Sin datos — nunca ha habido una escritura real confirmada en Shopify.</span></div>';
+const reposicionEvolucionSeguro = reposicionEvolucion || [];
+const evo7 = reposicionEvolucionSeguro.slice(-7);
+const evo30 = reposicionEvolucionSeguro;
+const COLORES_EVO_REPO = { actualizados: '#059669', simulados: '#9CA3AF', errores: '#DC2626' };
+const ETIQUETAS_EVO_REPO = { actualizados: 'Actualizado', simulados: 'Simulado', errores: 'Error' };
+const sincEvolucionHtml = reposicionEvolucionSeguro.length
+  ? '<div class="filterbar" style="margin-bottom:8px;">' +
+      '<button type="button" class="btn-sm btn-outline evo-tab active" data-evo="repo7" onclick="mostrarEvolucion(this,\'repo\')">Últimos 7 días</button>' +
+      '<button type="button" class="btn-sm btn-outline evo-tab" data-evo="repo30" onclick="mostrarEvolucion(this,\'repo\')">Últimos 30 días</button>' +
+    '</div>' +
+    '<div id="evo-repo7">' + graficoBarrasApiladas({ dias: evo7, claves: ['actualizados', 'simulados', 'errores'], colores: COLORES_EVO_REPO, etiquetas: ETIQUETAS_EVO_REPO }) + '</div>' +
+    '<div id="evo-repo30" style="display:none;">' + graficoBarrasApiladas({ dias: evo30, claves: ['actualizados', 'simulados', 'errores'], colores: COLORES_EVO_REPO, etiquetas: ETIQUETAS_EVO_REPO }) + '</div>'
+  : '<div class="empty-state">Sin datos todavía — la evolución aparecerá aquí tras la primera ejecución diaria del lote.</div>';
+const sincronizacionHtml =
+  '<section class="block"><div class="sec-head"><h2>Sincronización de inventario AFT → Shopify</h2><a class="sec-link" data-page="coincidencias" onclick="ir(this)">Ver Coincidencias ' + icon('chevron', 12) + '</a></div>' +
+  '<div class="panel-card">' +
+    '<div class="kpi-row" style="margin-bottom:16px;">' + sincTarjetasHtml + '</div>' +
+    '<div style="font-size:12.5px;color:var(--sub);display:flex;flex-direction:column;gap:4px;margin-bottom:16px;">' + sincUltimaEjecucionHtml + sincUltimaEfectivaHtml + '</div>' +
+    '<div style="font-size:12px;font-weight:600;color:var(--sub);margin-bottom:6px;">Evolución de la sincronización diaria</div>' +
+    sincEvolucionHtml +
+  '</div></section>';
+
 const kpiHtml = kpis.map(k =>
   '<div class="kpi kpi-clickable" data-page="' + k.page + '" onclick="ir(this)"><div class="kpi-icon" style="background:' + k.bg + ';color:' + k.color + '">' + icon(k.icon, 18) + '</div><div class="kpi-n">' + k.n + '</div><div class="kpi-l">' + k.l + '</div></div>'
 ).join('');
@@ -163,7 +259,16 @@ if (!ultimoSync) {
   atencion.push({ icon: 'alertTri', color: '#D97706', bg: '#FFFBEB', title: 'Todavía no se ha ejecutado ninguna comparación', desc: 'Lanza la importación AFT y la sincronización con Shopify desde Integraciones.', cta: 'Ir a Integraciones', page: 'integraciones' });
 }
 if (stockCeroRows.length > 0) {
-  atencion.push({ icon: 'packageX', color: '#DC2626', bg: '#FEF2F2', title: pl(stockCeroRows.length, 'producto propuesto a stock cero', 'productos propuestos a stock cero'), desc: 'AFT los reporta sin stock y Shopify todavía los muestra con unidades.', cta: 'Ver en Coincidencias', page: 'coincidencias' });
+  atencion.push({ icon: 'packageX', color: '#DC2626', bg: '#FEF2F2', prioridad: 1, title: pl(stockCeroRows.length, 'producto AFT a stock cero pendiente', 'productos AFT a stock cero pendientes'), desc: 'AFT confirma 0 unidades y Shopify todavía las muestra disponibles — prioridad máxima de corrección.', cta: 'Ver en Coincidencias', page: 'coincidencias' });
+}
+if (ultimaReposicion && (ultimaReposicion.status === 'parcial' || Number(ultimaReposicion.errores) > 0)) {
+  atencion.push({ icon: 'alertTri', color: '#DC2626', bg: '#FEF2F2', prioridad: 1, title: 'La reposición de stock terminó con errores', desc: num(ultimaReposicion.errores) + ' error(es)' + (ultimaReposicion.verificaciones_fallidas > 0 ? ' y ' + num(ultimaReposicion.verificaciones_fallidas) + ' verificación(es) sin confirmar' : '') + ' — nunca se oculta bajo "completa".', cta: 'Ver en Coincidencias', page: 'coincidencias' });
+}
+if ((cambiosAlertas || []).length > 0) {
+  atencion.push({ icon: 'alertTri', color: '#D97706', bg: '#FFFBEB', prioridad: 2, title: pl(cambiosAlertas.length, 'subida de coste relevante de AFT', 'subidas de coste relevantes de AFT'), desc: 'Coste subido ' + (cambiosUmbralAlertaPct || 10) + '% o más respecto al valor anterior.', cta: 'Ver Cambios AFT', page: 'cambios-aft' });
+}
+if (ultimoPipeline && ultimoPipeline.status === 'error') {
+  atencion.push({ icon: 'alertTri', color: '#DC2626', bg: '#FEF2F2', prioridad: 1, title: 'La última ejecución del pipeline completo terminó con error', desc: ultimoPipeline.error_message || 'Revisa los logs del servicio o /status.', cta: 'Ver Integraciones', page: 'integraciones' });
 }
 if (incidenciaMatchRows.length > 0 || (ultimoSync && ultimoSync.total_incidencias > 0)) {
   const nIncidencias = ultimoSync ? ultimoSync.total_incidencias : incidenciaMatchRows.length;
@@ -188,8 +293,12 @@ if (!ultimaRentabilidad) {
   atencion.push({ icon: 'activity', color: '#2563EB', bg: '#EFF6FF', title: 'El agente de rentabilidad todavía no se ha ejecutado', desc: 'Lánzalo desde Integraciones para ver márgenes y alertas reales.', cta: 'Ir a Integraciones', page: 'integraciones' });
 }
 function attnBtn(a){ return '<a class="btn-outline" data-page="' + a.page + '" onclick="ir(this)">' + esc(a.cta) + ' ' + icon('chevron', 13) + '</a>'; }
-const atencionHtml = atencion.length
-  ? atencion.slice(0, 4).map(a => '<div class="attn-card"><div class="attn-icon" style="background:' + a.bg + ';color:' + a.color + '">' + icon(a.icon, 18) + '</div><div class="attn-title">' + esc(a.title) + '</div><div class="attn-desc">' + esc(a.desc) + '</div>' + attnBtn(a) + '</div>').join('')
+// Centro de alertas prioritarias: más urgente primero (prioridad 1 = stock
+// cero pendiente/errores reales; 2 = subidas de coste/pérdidas; 3 = resto)
+// — nunca el orden en que se calculó cada una.
+const atencionOrdenada = [...atencion].sort((a, b) => (a.prioridad || 3) - (b.prioridad || 3));
+const atencionHtml = atencionOrdenada.length
+  ? atencionOrdenada.slice(0, 6).map(a => '<div class="attn-card"><div class="attn-icon" style="background:' + a.bg + ';color:' + a.color + '">' + icon(a.icon, 18) + '</div><div class="attn-title">' + esc(a.title) + '</div><div class="attn-desc">' + esc(a.desc) + '</div>' + attnBtn(a) + '</div>').join('')
   : '<div class="empty-state" style="grid-column:1/-1;">Todo al día. No hay nada que necesite tu atención ahora mismo.</div>';
 
 // --- Actividad: historial real de sync_runs + incidencias registradas ---
@@ -220,6 +329,20 @@ const ESTADO_BADGE = {
   sin_cambio: '<span class="badge badge-ok">Sin cambios</span>'
 };
 const MATCHED_BY_LABEL = { ean: 'EAN', sku: 'SKU' };
+// Estado real de la última vez que el agente de reposición evaluó esta ref
+// (ver src/metricas.js, obtenerUltimoEventoPorRef) — nunca inventado: sin
+// ningún evento todavía, se muestra "Sin ejecutar todavía", nunca un
+// "Actualizado" implícito por tener diferencia de stock.
+const ultimoEventoPorRefSeguro = ultimoEventoPorRef || {};
+function estadoRealCelda(ref) {
+  const e = ultimoEventoPorRefSeguro[ref];
+  if (!e) return '<span class="estado-real-badge" style="color:var(--sub);">Sin ejecutar todavía</span>';
+  if (e.tipo_evento === 'error') return '<span class="estado-real-badge" style="color:#DC2626;font-weight:600;">Error</span>';
+  if (e.tipo_evento === 'sin_cambios') return '<span class="estado-real-badge" style="color:var(--sub);">Sin cambios</span>';
+  if (!e.escrito) return '<span class="estado-real-badge" style="color:#6B7280;font-weight:600;">Simulado (dry run)</span>';
+  if (e.verificado) return '<span class="estado-real-badge" style="color:#059669;font-weight:600;">Actualizado y verificado</span>';
+  return '<span class="estado-real-badge" style="color:#D97706;font-weight:600;">Actualizado sin verificar</span>';
+}
 function filaCoincidencia(r){
   return '<tr data-ref="' + esc((r.ref||'').toLowerCase()) + '" data-nombre="' + esc((r.descripcion||'').toLowerCase()) + '" data-estado="' + esc(r.estado) + '">' +
     '<td data-label="Producto"><div style="font-weight:600;">' + esc(titleCase(r.descripcion || r.ref)) + '</div><div style="font-size:11px;color:var(--sub);">' + esc(r.ref) + '</div></td>' +
@@ -234,6 +357,7 @@ function filaCoincidencia(r){
     '<td class="num" data-label="PVP Shopify">' + eur(r.shopify_price) + '</td>' +
     '<td class="num" data-label="PVP AFT">' + eur(r.precio_venta_aft) + '</td>' +
     '<td data-label="Estado">' + (ESTADO_BADGE[r.estado] || esc(r.estado)) + '</td>' +
+    '<td data-label="Estado real">' + estadoRealCelda(r.ref) + '</td>' +
     '<td data-label="Enlaces">' + enlaceShopify(r.shopify_product_id) + '<div style="margin-top:4px;">' + copiarReferenciaBtn(r.ref) + '</div></td>' +
     '</tr>';
 }
@@ -247,12 +371,28 @@ const coincidenciasHtml = matchRows.length
         '<option value="sin_cambio">Sin cambios</option>' +
       '</select>' +
     '</div>' +
-    '<div class="table-note" id="contadorCoincidencias">Mostrando ' + matchRows.length + ' de ' + pl(matchRows.length, 'coincidencia fiable', 'coincidencias fiables') + ' (emparejadas por EAN o SKU inequívoco). Las coincidencias ambiguas no se muestran aquí — se gestionan como incidencia (ver Actividad).</div>' +
-    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca (AFT)</th><th>Coincide por</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th><th>Enlaces</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
+    '<div class="table-note" id="contadorCoincidencias">Mostrando ' + matchRows.length + ' de ' + pl(matchRows.length, 'coincidencia fiable', 'coincidencias fiables') + ' (emparejadas por EAN o SKU inequívoco, sin ninguna alerta de ambigüedad). Ordenadas con prioridad: primero las referencias con AFT a 0 y Shopify todavía disponible. Las referencias bloqueadas se listan aparte, más abajo, con su motivo.</div>' +
+    '<div class="table-scroll"><table><thead><tr><th>Producto</th><th>Marca (AFT)</th><th>Coincide por</th><th>Stock AFT</th><th>Stock Shopify</th><th>Diferencia</th><th>Coste AFT sin IVA</th><th>Coste AFT c/impuestos</th><th>Coste en Shopify</th><th>PVP Shopify</th><th>PVP AFT</th><th>Estado</th><th>Estado real</th><th>Enlaces</th></tr></thead><tbody id="tablaCoincidenciasBody">' +
     matchRows.map(filaCoincidencia).join('') +
     '</tbody></table></div>' +
     '<p style="font-size:11.5px;color:var(--sub);margin-top:10px;">El coste registrado en Shopify se muestra tal cual está en la ficha — su tratamiento de IVA está pendiente de validar, por eso no se calcula una "diferencia de coste" automática entre AFT y Shopify.</p>'
   : '<div class="empty-state">Todavía no hay coincidencias guardadas. Ejecuta una sincronización desde Integraciones.</div>';
+
+// --- Referencias bloqueadas: separadas a propósito de las fiables de
+//     arriba — no son candidatas a actualizarse mientras tengan el motivo
+//     que se muestra, aunque tengan diferencia de stock real. ---
+const referenciasBloqueadasSeguro = referenciasBloqueadas || [];
+function filaBloqueada(r) {
+  return '<div class="blocked-row"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
+    '<div><strong>' + esc(r.ref) + '</strong>' + (r.shopify_product_title ? ' · ' + esc(titleCase(r.shopify_product_title)) : '') + '</div>' +
+    '<div style="font-size:11px;color:var(--sub);">Stock AFT ' + num(r.stock_aft) + ' · Stock Shopify ' + num(r.shopify_stock) + '</div>' +
+    '</div><div class="motivos">' + esc(r.motivos.join(' · ')) + '</div></div>';
+}
+const bloqueadasHtml = referenciasBloqueadasSeguro.length
+  ? '<h3 style="font-size:14px;margin:28px 0 6px;">Referencias bloqueadas <span class="badge badge-off" style="background:#FFFBEB;color:#B45309;">' + pl(referenciasBloqueadasSeguro.length, 'referencia', 'referencias') + '</span></h3>' +
+    '<p style="font-size:11.5px;color:var(--sub);margin:0 0 12px;">No son candidatas a actualizarse mientras tengan el motivo indicado, aunque tengan diferencia de stock real — nunca se actualizan sin resolverlo primero.</p>' +
+    referenciasBloqueadasSeguro.map(filaBloqueada).join('')
+  : '<h3 style="font-size:14px;margin:28px 0 6px;">Referencias bloqueadas</h3><div class="empty-state">Ninguna referencia bloqueada ahora mismo.</div>';
 
 // --- Reposición automática de stock (Agente 2, paso 2) ---
 const TIPO_REPO_BADGE = {
@@ -460,6 +600,22 @@ const cambiosAlertasHtml = '<h3 style="font-size:14px;margin:0 0 6px;">Alertas d
       cambiosAlertasSeguro.map(filaAlertaCambio).join('') +
       '</tbody></table></div>'
     : '<div class="empty-state">Ninguna subida de coste igual o mayor al umbral configurado entre los últimos cambios registrados.</div>');
+
+// --- Evolución de costes, stock y PVP: recuento diario de cambios REALES
+//     detectados por AFT (nunca un valor por referencia individual, que
+//     sería una serie de precios distinta a lo que esta página muestra). ---
+const cambiosEvolucionSeguro = cambiosEvolucion || [];
+const COLORES_EVO_CAMBIOS = { coste: '#DC2626', pvp: '#2563EB', stock: '#059669' };
+const ETIQUETAS_EVO_CAMBIOS = { coste: 'Coste', pvp: 'PVP sin IVA', stock: 'Stock' };
+const cambiosEvolucionHtml = cambiosEvolucionSeguro.length
+  ? '<div class="filterbar" style="margin-bottom:8px;">' +
+      '<button type="button" class="btn-sm btn-outline evo-tab active" data-evo="cambios7" onclick="mostrarEvolucion(this,\'cambios\')">Últimos 7 días</button>' +
+      '<button type="button" class="btn-sm btn-outline evo-tab" data-evo="cambios30" onclick="mostrarEvolucion(this,\'cambios\')">Últimos 30 días</button>' +
+    '</div>' +
+    '<div id="evo-cambios7">' + graficoBarrasApiladas({ dias: cambiosEvolucionSeguro.slice(-7), claves: ['coste', 'pvp', 'stock'], colores: COLORES_EVO_CAMBIOS, etiquetas: ETIQUETAS_EVO_CAMBIOS }) + '</div>' +
+    '<div id="evo-cambios30" style="display:none;">' + graficoBarrasApiladas({ dias: cambiosEvolucionSeguro, claves: ['coste', 'pvp', 'stock'], colores: COLORES_EVO_CAMBIOS, etiquetas: ETIQUETAS_EVO_CAMBIOS }) + '</div>'
+  : '<div class="empty-state">Sin datos todavía — la evolución aparecerá aquí en cuanto AFT informe algún cambio real de coste, PVP o stock.</div>';
+
 const cambiosRetencionHtml = cambiosRetencion
   ? '<div class="table-note" style="margin-top:18px;">Retención definida: ' + pl(cambiosRetencionMeses || 12, 'mes', 'meses') + '. ' +
     (cambiosRetencion.pendientesDePurga > 0
@@ -910,6 +1066,10 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '.badge-ok{background:#ECFDF5;color:#059669;}' +
 '.badge-off{background:#F3F4F6;color:var(--sub);}' +
 '.btn-sm{padding:5px 10px;font-size:11.5px;margin-top:0;}' +
+'.evo-tab.active{background:var(--brand);color:#fff;border-color:var(--brand);}' +
+'.blocked-row{border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:8px;background:#fff;}' +
+'.blocked-row .motivos{font-size:11px;color:#B45309;margin-top:3px;}' +
+'.estado-real-badge{font-size:10.5px;display:block;margin-top:3px;}' +
 '.filterbar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}' +
 '.filter-select{font-size:12.5px;font-weight:500;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--ink);}' +
 '.filter-checkbox{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;color:var(--ink);padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;}' +
@@ -936,7 +1096,7 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '.hamburger{display:none;margin-left:auto;background:none;border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:16px;cursor:pointer;color:var(--ink);}' +
 '@media(max-width:700px){table thead{display:none;}table,table tbody,table tr,table td{display:block;width:100%;}table tr{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;padding:4px 0;background:#fff;}table td{border-bottom:none;padding:6px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:right;}table td.num{text-align:right;}table td::before{content:attr(data-label);font-size:11px;color:var(--sub);font-weight:600;text-align:left;}table td:empty{display:none;}.table-scroll{overflow-x:visible;}tr.row-detalle td{display:block;text-align:left;}.score-grid{grid-template-columns:1fr;}}' +
 '@media(max-width:900px){.kpi-row{grid-template-columns:repeat(2,1fr);}.attn-grid{grid-template-columns:1fr;}.bottom-grid{grid-template-columns:1fr;}body{flex-direction:column;}.sidebar{width:100%;min-height:auto;position:relative;}.sb-logo{padding-right:16px;}.hamburger{display:block;}.sb-nav{display:none;margin-top:10px;}.sb-nav.open{display:block;}main{padding:20px;}}' +
-'@media(max-width:480px){.header{flex-direction:column;align-items:stretch;margin-bottom:18px;gap:8px;}.header h1{font-size:19px;}.header .sub{font-size:13px;}.header-right{justify-content:flex-end;gap:10px;margin-top:2px;flex-wrap:wrap;}.updated{font-size:11px;}.sb-logo{padding:0 16px 4px;}.sb-foot{display:none;}.sidebar{padding:12px 0;}main{padding:14px;}.kpi-row{gap:10px;margin-bottom:22px;}.kpi{padding:12px 14px;}.kpi-icon{width:26px;height:26px;margin-bottom:7px;}.kpi-n{font-size:21px;}.kpi-l{font-size:11px;}}' +
+'@media(max-width:480px){.header{flex-direction:column;align-items:stretch;margin-bottom:18px;gap:8px;}.header h1{font-size:19px;}.header .sub{font-size:13px;}.header-right{justify-content:flex-end;gap:10px;margin-top:2px;flex-wrap:wrap;}.updated{font-size:11px;}.sb-logo{padding:0 16px 4px;}.sb-foot{display:none;}.sidebar{padding:12px 0;}main{padding:14px;}.kpi-row{gap:10px;margin-bottom:22px;}.kpi{padding:12px 14px;}.kpi-icon{width:26px;height:26px;margin-bottom:7px;}.kpi-n{font-size:21px;}.kpi-l{font-size:11px;}.filterbar{flex-direction:column;align-items:stretch;}.filterbar input,.filterbar select,.filterbar .filter-select{width:100%;max-width:none!important;}.filter-checkbox{padding:4px 0;}.evo-tab{flex:1;}.blocked-row{padding:9px 12px;}}' +
 '</style></head><body>' +
 
 '<nav class="sidebar" id="sidebar">' +
@@ -964,21 +1124,22 @@ const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta n
 '<div class="header"><div><h1>AFT Intelligence</h1><div class="sub">Control de inventario y oportunidades entre AFT y Shopify — solo lectura.</div></div>' +
 '<div class="header-right">' + (ultimoSync ? '<div class="updated">Última comparación: ' + esc(tiempoRelativo(ultimoSync.finished_at)) + '</div>' : '') + '<div class="avatar">H</div></div></div>' +
 '<div class="kpi-row">' + kpiHtml + '</div>' +
-'<section class="block" id="attnSection"><div class="sec-head"><h2>Necesita tu atención</h2></div><div class="attn-grid">' + atencionHtml + '</div></section>' +
+sincronizacionHtml +
+'<section class="block" id="attnSection"><div class="sec-head"><h2>Centro de alertas prioritarias</h2></div><div class="attn-grid">' + atencionHtml + '</div></section>' +
 '<div class="bottom-grid">' +
 '<section class="block"><div class="sec-head"><h2>Actividad reciente</h2><a class="sec-link" data-page="actividad" onclick="ir(this)">Ver toda la actividad ' + icon('chevron', 12) + '</a></div><div class="panel-card">' + timelineHtmlResumen + '</div></section>' +
 '<section class="block"><div class="sec-head"><h2>Integraciones</h2><a class="sec-link" data-page="integraciones" onclick="ir(this)">Ver detalle ' + icon('chevron', 12) + '</a></div><div class="panel-card" style="padding:16px 18px;"><div class="integ-row"><span class="dot ' + eImport.dot + '"></span><div><div class="integ-name" style="font-size:12.5px;">Importación AFT</div></div><span class="integ-status">' + esc(eImport.texto) + '</span></div><div class="integ-row" style="margin-top:10px;"><span class="dot ' + eSync.dot + '"></span><div><div class="integ-name" style="font-size:12.5px;">Comparación Shopify ↔ AFT</div></div><span class="integ-status">' + esc(eSync.texto) + '</span></div></div></section>' +
 '</div>' +
 '</div>' +
 
-'<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
+'<div class="page" id="page-coincidencias"><div class="pagetitle">Coincidencias AFT ↔ Shopify</div>' + coincidenciasHtml + bloqueadasHtml + reposicionHtml + previsualizacionHtml + '</div>' +
 
 '<div class="page" id="page-oportunidades"><div class="pagetitle">Oportunidades comerciales</div>' + oportunidadesHtml + demandaHtml + '</div>' +
 
 '<div class="page" id="page-productos"><div class="pagetitle">Productos en Shopify</div>' + productosHtml + '</div>' +
 
 '<div class="page" id="page-rentabilidad"><div class="pagetitle">Rentabilidad</div>' + resumenEjecutivoHtml + rentabilidadHtml + recomendacionesHtml + '</div>' +
-'<div class="page" id="page-cambios-aft"><div class="pagetitle">Cambios AFT</div>' + cambiosAlertasHtml + '<h3 style="font-size:14px;margin:28px 0 6px;">Historial de cambios</h3>' + cambiosHtml + cambiosRetencionHtml + '</div>' +
+'<div class="page" id="page-cambios-aft"><div class="pagetitle">Cambios AFT</div>' + cambiosAlertasHtml + '<h3 style="font-size:14px;margin:28px 0 6px;">Evolución de costes, stock y PVP</h3>' + cambiosEvolucionHtml + '<h3 style="font-size:14px;margin:28px 0 6px;">Historial de cambios</h3>' + cambiosHtml + cambiosRetencionHtml + '</div>' +
 
 '<div class="page" id="page-actividad"><div class="pagetitle">Actividad</div><div class="panel-card">' + timelineHtml + '</div></div>' +
 
@@ -993,6 +1154,10 @@ fichasHtml +
 
 '</main><script>' +
 'function ir(btn){var id=btn.getAttribute("data-page");document.querySelectorAll(".sb-link").forEach(function(a){a.classList.remove("active");if(a.getAttribute("data-page")===id)a.classList.add("active");});document.querySelectorAll(".page").forEach(function(p){p.classList.remove("active")});document.getElementById("page-"+id).classList.add("active");window.scrollTo(0,0);document.getElementById("sbNav").classList.remove("open");}' +
+// Alterna entre el gráfico de 7 y el de 30 días — sin ninguna librería,
+// solo mostrar/ocultar los dos SVG ya generados en el servidor (nunca se
+// recalcula nada en el cliente).
+'function mostrarEvolucion(btn,prefijo){var grupo=btn.parentElement.querySelectorAll(".evo-tab");grupo.forEach(function(b){b.classList.remove("active")});btn.classList.add("active");var cual=btn.getAttribute("data-evo");document.getElementById("evo-"+prefijo+"7").style.display=(cual===prefijo+"7")?"block":"none";document.getElementById("evo-"+prefijo+"30").style.display=(cual===prefijo+"30")?"block":"none";}' +
 'function copiarReferencia(btn,ref){var original=btn.innerHTML;function ok(){btn.innerHTML="Copiado ✓";setTimeout(function(){btn.innerHTML=original;},1500);}function fallback(){try{var ta=document.createElement("textarea");ta.value=ref;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.focus();ta.select();document.execCommand("copy");document.body.removeChild(ta);ok();}catch(e){btn.innerHTML="Ref: "+ref;}}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ref).then(ok).catch(fallback);}else{fallback();}}' +
 'function toggleNav(){document.getElementById("sbNav").classList.toggle("open");}' +
 'function filtrarCoincidencias(){var q=(document.getElementById("buscarCoincidencia").value||"").toLowerCase();var estado=document.getElementById("filtroEstadoCoincidencia").value;var visibles=0;document.querySelectorAll("#tablaCoincidenciasBody tr").forEach(function(r){var okTexto=r.dataset.ref.indexOf(q)>-1||r.dataset.nombre.indexOf(q)>-1;var okEstado=!estado||r.dataset.estado===estado;var match=okTexto&&okEstado;r.style.display=match?"":"none";if(match)visibles++;});var c=document.getElementById("contadorCoincidencias");var total=document.querySelectorAll("#tablaCoincidenciasBody tr").length;if(c)c.textContent="Mostrando "+visibles+" de "+total+(total===1?" coincidencia.":" coincidencias.");}' +
