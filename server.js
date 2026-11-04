@@ -10,7 +10,7 @@ const { credencialesValidas, puedeIntentar, registrarIntentoFallido, registrarEx
 const { pool } = require('./src/db');
 const { runInventorySync, ingestAft, STOCK_MINIMO_OPORTUNIDAD } = require('./src/sync');
 const { ejecutarAnalisisRentabilidad, PVP_COMPLEMENTO_MAX } = require('./src/rentabilidad');
-const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, obtenerBloqueadosPorMotivo, obtenerUltimaReposicionEfectiva } = require('./src/reposicion');
+const { ejecutarReposicionStock, ejecutarReposicionUnaReferencia, previsualizarReposicion, obtenerBloqueadosPorMotivo, obtenerUltimaReposicionEfectiva, obtenerVerificacionUbicacionPrincipal } = require('./src/reposicion');
 const { ejecutarAnalisisOportunidades } = require('./src/oportunidades');
 const { ejecutarAnalisisDemanda, hayIntegracionConfigurada: hayIntegracionDemandaConfigurada } = require('./src/demanda');
 const { ejecutarGeneracionFichas, hayProveedorIaConfigurado, revisarBorrador, editarBorrador } = require('./src/fichasIa');
@@ -113,6 +113,30 @@ app.get('/api/shopify-scopes', basicAuth, async (req, res) => {
     res.json({ ok: true, scopes, tieneWriteInventory: scopes.includes('write_inventory'), checkedAt: new Date().toISOString() });
   } catch (e) {
     console.error('[shopify-scopes] Error al consultar los scopes:', e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Diagnóstico de solo lectura para confirmar SHOPIFY_MAIN_LOCATION_ID antes
+// de activar cualquier escritura real: combina (a) una verificación con
+// datos YA LEÍDOS en la última sincronización (sin llamar a Shopify de
+// nuevo) y (b) una lectura en vivo de las ubicaciones reales de la tienda —
+// esta segunda parte requiere el scope read_locations; si no está
+// concedido, se informa explícitamente (permisoConcedido:false) en vez de
+// hacer fallar toda la comprobación, ya que la parte (a) no depende de él.
+app.get('/api/reposicion-run/verificar-ubicacion', basicAuth, async (req, res) => {
+  try {
+    const verificacionDatos = await obtenerVerificacionUbicacionPrincipal();
+    let ubicacionesEnVivo;
+    try {
+      const token = await shopify.getShopifyToken();
+      ubicacionesEnVivo = await shopify.listarUbicaciones(token);
+    } catch (e) {
+      ubicacionesEnVivo = { permisoConcedido: null, ubicaciones: [], error: e.message };
+    }
+    res.json({ ok: true, verificacionDatos, ubicacionesEnVivo, checkedAt: new Date().toISOString() });
+  } catch (e) {
+    console.error('[verificar-ubicacion] Error:', e.message);
     res.status(502).json({ ok: false, error: e.message });
   }
 });
