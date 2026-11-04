@@ -513,6 +513,36 @@ async function previsualizarReposicion(limite) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Verificación de SHOPIFY_MAIN_LOCATION_ID usando datos YA LEÍDOS de Shopify
+// en la última sincronización (shopify_match.alerta_ubicacion_no_encontrada,
+// calculada en sync.js comparando contra esta misma variable) — nunca hace
+// una llamada nueva a Shopify. Si casi todas las coincidencias encuentran la
+// ubicación configurada, la variable está bien puesta; si NINGUNA la
+// encuentra habiendo coincidencias, es señal fuerte de que apunta a una
+// ubicación que no es donde Shopify guarda el inventario real.
+// ---------------------------------------------------------------------------
+async function obtenerVerificacionUbicacionPrincipal() {
+  const { rows } = await pool.query(`
+    SELECT
+      COUNT(*)::int AS total_coincidencias,
+      COUNT(*) FILTER (WHERE alerta_ubicacion_no_encontrada = false)::int AS ubicacion_encontrada,
+      COUNT(*) FILTER (WHERE alerta_ubicacion_no_encontrada = true)::int AS ubicacion_no_encontrada,
+      COUNT(*) FILTER (WHERE alerta_multiples_ubicaciones = true)::int AS multiples_ubicaciones
+    FROM shopify_match
+    WHERE matched_by IN ('ean','sku')
+  `);
+  const r = rows[0];
+  return {
+    locationIdConfigurado: MAIN_LOCATION_ID,
+    totalCoincidencias: r.total_coincidencias,
+    ubicacionEncontrada: r.ubicacion_encontrada,
+    ubicacionNoEncontrada: r.ubicacion_no_encontrada,
+    multiplesUbicaciones: r.multiples_ubicaciones,
+    probablementeIncorrecto: r.total_coincidencias > 0 && r.ubicacion_encontrada === 0
+  };
+}
+
 module.exports = {
   ejecutarReposicionStock,
   ejecutarReposicionUnaReferencia,
@@ -522,5 +552,6 @@ module.exports = {
   obtenerCandidatos,
   contarOmitidosPorAmbiguedad,
   obtenerBloqueadosPorMotivo,
-  obtenerUltimaReposicionEfectiva
+  obtenerUltimaReposicionEfectiva,
+  obtenerVerificacionUbicacionPrincipal
 };

@@ -229,4 +229,24 @@ async function listProducts(token, queryFilter) {
   return shopifyGraphql(token, query, { q: queryFilter || null });
 }
 
-module.exports = { getShopifyToken, findVariantByBarcode, findVariantBySku, listProducts, getAllVariants };
+// Lista las ubicaciones reales de la tienda — solo lectura, para poder
+// confirmar SHOPIFY_MAIN_LOCATION_ID contra Shopify antes de activar
+// cualquier escritura real. Usa el mismo camino tolerante a permisos que
+// getAllVariants: si la app no tiene concedido el scope read_locations,
+// Shopify devuelve un error de permiso (no una lista vacía) — se distingue
+// explícitamente ese caso ("no se puede comprobar") de "la tienda no tiene
+// ubicaciones", para no confundir ambos.
+async function listarUbicaciones(token) {
+  const query = `{ locations(first: 50) { edges { node { id name isActive } } } }`;
+  const resultado = await shopifyGraphqlTolerante(token, query, {});
+  if (resultado.throttled) {
+    throw new Error('Shopify: límite de peticiones alcanzado al listar ubicaciones, reintenta en unos segundos.');
+  }
+  if (resultado.erroresPermiso.length) {
+    return { permisoConcedido: false, ubicaciones: [] };
+  }
+  const edges = (resultado.data.locations && resultado.data.locations.edges) || [];
+  return { permisoConcedido: true, ubicaciones: edges.map((e) => ({ id: e.node.id, name: e.node.name, isActive: e.node.isActive })) };
+}
+
+module.exports = { getShopifyToken, findVariantByBarcode, findVariantBySku, listProducts, getAllVariants, listarUbicaciones };
